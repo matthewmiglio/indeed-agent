@@ -38,13 +38,35 @@ Final review / would-submit step (dry-run halts here):
 
 ## Quick start
 
+First run — seed your persistent Indeed session:
+
 ```powershell
 poetry install
+poetry run python src/main.py login
+```
+
+### Live mode (actually applies)
+
+```powershell
+poetry run python src/main.py "apply to 10 graphic design jobs in Farmington, MI" `
+  --resume "C:\path\to\resume.pdf"
+```
+
+This submits real applications. Each Easy Apply walk ends by clicking the real submit button.
+
+### Dry-run (test / debug)
+
+Add `--dry-run` to walk the whole flow without submitting. The submit button becomes a no-op that logs intent and dumps the final page as `*-would-submit.*` in `data/debug/`. Useful for verifying selectors and field handling on a new job category before turning it loose.
+
+```powershell
 poetry run python src/main.py "apply to 10 graphic design jobs in Farmington, MI" `
   --resume "C:\path\to\resume.pdf" --dry-run
 ```
 
-First run: `poetry run python src/main.py login` to seed the persistent Indeed session in `data/browser_profile/`.
+### Other flags
+
+- `--debug` — dump every page as HTML + PNG to `data/debug/` (implied by `--dry-run`).
+- `--resume <path>` — resume PDF to upload during the application.
 
 ## Architecture
 
@@ -62,7 +84,7 @@ First run: `poetry run python src/main.py login` to seed the persistent Indeed s
 
 ## Safety
 
-`--dry-run` is the default operating mode. `form_filler.click_submit()` is a no-op under dry-run — it logs intent, dumps the final page as `*-would-submit.*`, and returns success. Real submissions require an explicit flag (intentionally not documented here).
+The default mode submits real applications — this app is built to work. Use `--dry-run` whenever you're iterating on selectors, profile data, or a new job category. It walks the entire flow and stops at submit, logging intent and dumping the final page as `*-would-submit.*`. Once you've verified a run looks clean, drop the flag and go live.
 
 ## Requirements
 
