@@ -327,14 +327,17 @@ def _shift_answer(label: str, profile: dict) -> str | None:
     is_night = any(k in avail for k in ("night", "evening", "pm-", "5pm-", "6pm-"))
     is_overnight = "overnight" in avail or "graveyard" in avail
     is_weekend = "weekend" in avail or "saturday" in avail or "sunday" in avail
+    is_holiday = "holiday" in avail
     if "overnight" in label_lc or "graveyard" in label_lc:
         return "Yes" if is_overnight else "No"
-    if "night shift" in label_lc or "evening shift" in label_lc:
+    if "night" in label_lc or "evening" in label_lc:
         return "Yes" if is_night else "No"
-    if "day shift" in label_lc or "morning shift" in label_lc or "afternoon shift" in label_lc:
+    if "morning" in label_lc or "day shift" in label_lc or "afternoon" in label_lc:
         return "Yes" if is_day else "No"
-    if "weekend" in label_lc and "shift" in label_lc:
+    if "weekend" in label_lc:
         return "Yes" if is_weekend else "No"
+    if "holiday" in label_lc:
+        return "Yes" if is_holiday else "No"
     return None
 
 
@@ -380,7 +383,12 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
         yrs = _job_specific_years(label, profile)
         if yrs is not None:
             return yrs
-    if "shift" in label and field.field_type in ("checkbox", "radio"):
+    if field.field_type in ("checkbox", "radio") and any(
+        k in label for k in (
+            "shift", "mornings", "evenings", "nights", "overnight",
+            "weekends", "holidays", "graveyard"
+        )
+    ):
         shift = _shift_answer(label, profile)
         if shift is not None:
             return shift
