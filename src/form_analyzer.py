@@ -20,6 +20,7 @@ class FormField:
     current_value: str = ""
     selector: str = ""
     name: str = ""
+    max_length: int = 0  # 0 means no limit; set when the field has maxLength
 
 
 async def analyze_form_page(page: Page) -> list[FormField]:
@@ -98,6 +99,26 @@ async def analyze_form_page(page: Page) -> list[FormField]:
             else if (el.name) selector = '[name="' + el.name + '"]';
             else if (el.getAttribute('data-testid')) selector = '[data-testid="' + el.getAttribute('data-testid') + '"]';
 
+            // Capture maxLength so the filler / LLM can respect it.
+            let maxLen = 0;
+            if (el.maxLength && el.maxLength > 0) maxLen = el.maxLength;
+            // Indeed renders a JS-side counter "X / Y characters" in a sibling
+            // div near the field — there's no maxLength attribute. Walk up
+            // ancestors and search their text for the limit.
+            if (!maxLen) {
+                let walker = el;
+                for (let i = 0; i < 6 && walker; i++) {
+                    walker = walker.parentElement;
+                    if (!walker) break;
+                    // textContent of a wrapper is cheap and reliable.
+                    const txt = walker.textContent || '';
+                    // Indeed's counter renders as either "0 / 500" (empty
+                    // state) or "544 / 500 characters" (overflow state).
+                    // Match both shapes; the limit is always the SECOND number.
+                    const m = txt.match(/(\d+)\s*\/\s*(\d+)(?:\s*characters?)?(?:\s|<)/i);
+                    if (m) { maxLen = parseInt(m[2], 10); break; }
+                }
+            }
             fields.push({
                 id: el.id || '',
                 name: el.name || '',
@@ -107,7 +128,8 @@ async def analyze_form_page(page: Page) -> list[FormField]:
                 value: el.value || '',
                 options: options,
                 placeholder: el.placeholder || '',
-                selector: selector
+                selector: selector,
+                max_length: maxLen
             });
         });
 
@@ -197,6 +219,7 @@ async def analyze_form_page(page: Page) -> list[FormField]:
             current_value=f.get("value", ""),
             selector=f.get("selector", ""),
             name=f.get("name", ""),
+            max_length=int(f.get("max_length", 0) or 0),
         ))
 
     print(f"  [form] Analyzed page: found {len(form_fields)} fields")

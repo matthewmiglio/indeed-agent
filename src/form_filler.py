@@ -136,6 +136,21 @@ FIELD_MAP = [
     ("current title", "current_job_title"),
     ("current employer", "current_employer"),
     ("current company", "current_employer"),
+    # Employment-history block fields (Indeed asks these on some forms).
+    ("employer name", "current_employer"),
+    ("company name", "current_employer"),
+    ("most recent employer", "current_employer"),
+    ("recent employer", "current_employer"),
+    ("previous employer", "current_employer"),
+    ("recent job title", "current_job_title"),
+    ("most recent job title", "current_job_title"),
+    ("previous job title", "current_job_title"),
+    ("recent position", "current_job_title"),
+    # Employment-history dates — fall through to None (LLM) when profile
+    # lacks the data; we don't want to auto-fill today's date as a past
+    # employment start date.
+    ("start date", "current_job_start_date"),
+    ("end date", "_end_date"),  # special — handled below
 
     # Education
     ("highest level of education", "highest_education"),
@@ -149,11 +164,12 @@ FIELD_MAP = [
     ("expected compensation", "desired_salary"),
     ("pay expectation", "desired_salary"),
 
-    # Start date
-    ("start date", "start_date"),
+    # Start date — only patterns clearly meaning "when can you begin work"
+    # (NOT employment-history "Start Date" which needs an actual past date).
     ("when can you start", "start_date"),
     ("available to start", "start_date"),
     ("earliest start", "start_date"),
+    ("when are you available", "start_date"),
 
     # Relocation & commute — always Yes. Saying No to either is an instant
     # auto-decline on most applications, regardless of the profile flag.
@@ -288,6 +304,67 @@ def _credential_answer(label: str, profile: dict) -> str | None:
     return "Yes" if _has_credential(profile, keyword) else "No"
 
 
+def _experience_with_answer(label: str, profile: dict) -> str | None:
+    """If the label asks "do you have experience with [X]", check whether X
+    appears in skills / job titles / summary / degree. Return Yes when found,
+    No otherwise. None when this isn't an experience question.
+
+    This catches the LLM-overclaim failure mode where the model would say Yes
+    to anything that sounds reasonable for the job posting (e.g. "Food safety"
+    on a barista app even though the candidate has no food-service history).
+    """
+    import re
+    # Match both "experience with X" and "experience working in X" / "experience in X"
+    # forms — Indeed employers phrase the same question multiple ways.
+    m = re.search(
+        r"(?:do you|have you)[^?]*?\b(?:have|had)\b[^?]*?"
+        r"\b(?:experience|exposure|familiarity|working knowledge)\b[^?]*?"
+        r"(?:working\s+(?:in|at|on|as)\s+|with\s+|in\s+(?:a|an|the\s+)?|using\s+|in\s+)"
+        r"(.{2,80}?)(?:\?|\.|\*|$)",
+        label.lower(),
+    )
+    if not m:
+        return None
+    topic = re.sub(r"\b(a|an|the|using|in|of)\b", "", m.group(1)).strip()
+    if len(topic) < 2:
+        return None
+    haystack = " ".join(str(v).lower() for v in (
+        " ".join(profile.get("skills") or []),
+        profile.get("current_job_title") or "",
+        profile.get("experience_summary") or "",
+        profile.get("degree_field") or "",
+        profile.get("current_employer") or "",
+    ))
+    # Filter out generic vocabulary that's almost always present in any
+    # experience_summary, e.g. "Do you have experience with Accounting
+    # and finance experience?" must not match just because the summary
+    # contains the word "experience".
+    STOPWORDS = {
+        "experience", "exp", "background", "skills", "skill", "knowledge",
+        "familiarity", "exposure", "history", "training", "expertise",
+        "abilities", "ability", "work", "working", "use", "using",
+        "and", "or", "with", "in", "of", "the", "a", "an", "any", "some",
+    }
+    topic_words = [
+        w for w in re.split(r"\W+", topic.lower())
+        if len(w) >= 3 and w not in STOPWORDS
+    ]
+    if not topic_words:
+        return None
+    # Require the FIRST significant word (typically the most specific noun
+    # in the phrase — e.g. "aerospace" in "aerospace / defense / AS9100
+    # quality environment") to appear in the profile, OR all topic words
+    # to appear. This keeps generic words like "quality" from triggering
+    # a false Yes when the user has "Quality Control" in skills but no
+    # actual aerospace experience.
+    head = topic_words[0]
+    if head in haystack:
+        return "Yes"
+    if len(topic_words) > 1 and all(w in haystack for w in topic_words):
+        return "Yes"
+    return "No"
+
+
 def _job_specific_years(label: str, profile: dict) -> str | None:
     """If the label asks "how many years of [X] experience", check whether X
     matches the candidate's skills / job titles / summary. Return the
@@ -352,12 +429,41 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
     # ``start_date`` is often "Immediately" / "ASAP" which fails Indeed's date
     # validator. If the field is recognizable as a date input (label contains
     # "date" or field type is date), substitute today's date in MM/DD/YYYY.
-    if ("start date" in label or "earliest start" in label or "available to start" in label
+    # Availability "when can you start" date. Bare "Start Date" is excluded
+    # because it's often part of an employment-history block (past job start),
+    # in which case today's date would be wrong.
+    if ("earliest start" in label or "available to start" in label
             or "when can you start" in label or "desired start" in label
-            or field.field_type == "date"):
-        if field.field_type == "date" or "date" in label:
-            from datetime import date
-            return date.today().strftime("%m/%d/%Y")
+            or "anticipated start" in label or "soonest start" in label
+            or ("start date" in label and any(
+                k in label for k in ("avail", "can you", "earliest", "soonest", "would you")
+            ))):
+        from datetime import date
+        return date.today().strftime("%m/%d/%Y")
+
+    # Bare "Date *" / "Today's Date *" — the signature-date field on demographic
+    # / EEO pages. Without this catch the LLM hallucinates dates like 1999-01-01.
+    # Match when the label is just "date" (with optional asterisk / whitespace).
+    stripped = label.strip().rstrip("*").rstrip(":").strip().strip(" ")
+    if stripped in ("date", "today's date", "today’s date", "current date",
+                    "signature date", "date signed", "date *"):
+        from datetime import date
+        return date.today().strftime("%m/%d/%Y")
+
+    # Bug T — Country select disguised in a phone-number label.
+    # Forms like "Mobile Number...Country *" are SELECTS of country names. If
+    # the field is a select whose options contain country signals, pick US
+    # FIRST — before the phone-keyword match wins.
+    if field.field_type == "select":
+        opts_blob = " | ".join(field.options).lower()
+        country_signals = ("united states", "canada", "united kingdom", "australia")
+        # Look for the +country-code shape too: "United States (+1)", "Canada (+1)"
+        looks_country = (
+            (sum(1 for c in country_signals if c in opts_blob) >= 2)
+            or "(+1)" in opts_blob
+        )
+        if looks_country and ("country" in label or "country code" in label or "phone" in label):
+            return "United States"
 
     # State/Province fields that are SECRETLY country dropdowns. Some forms
     # mislabel the field — e.g. a "State/Province *" select whose only options
@@ -383,6 +489,10 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
         yrs = _job_specific_years(label, profile)
         if yrs is not None:
             return yrs
+    if "experience" in label and any(k in label for k in ("with ", "working ", " in ")):
+        exp = _experience_with_answer(label, profile)
+        if exp is not None:
+            return exp
     if field.field_type in ("checkbox", "radio") and any(
         k in label for k in (
             "shift", "mornings", "evenings", "nights", "overnight",
@@ -392,6 +502,16 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
         shift = _shift_answer(label, profile)
         if shift is not None:
             return shift
+
+    # "All" checkbox in a "select all shifts you can work" multi-select.
+    # When the label is just "All" (no other context), it's almost certainly
+    # the "I'm available for every shift type" option. With a M-F 8-5
+    # availability we are NOT fully open — answer No so the form doesn't claim
+    # 24/7 availability we don't have.
+    if (field.field_type == "checkbox" and label.strip().lower() == "all"):
+        avail = (profile.get("availability") or "").lower()
+        fully_open = ("24/7" in avail or "any time" in avail or "open" in avail)
+        return "Yes" if fully_open else "No"
 
     # When the form_analyzer picks up the boilerplate "Required fields are marked
     # with an asterisk (*)." as the label for a radio fieldset (Indeed's
@@ -413,9 +533,17 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
             # Static-answer shortcuts.
             if profile_key == "_skip":
                 return "__SKIP__"  # sentinel: caller must not fill or LLM-answer this field
+            # Yes/No static answers only make sense for radio/checkbox/select.
+            # Refusing them on typed inputs (text, tel, email, number) avoids
+            # the regression where a phone field labeled "Enter number to
+            # receive text messages" gets filled with the literal "Yes".
             if profile_key == "_yes":
+                if field.field_type in ("text", "tel", "email", "number", "url"):
+                    return None
                 return "Yes"
             if profile_key == "_no":
+                if field.field_type in ("text", "tel", "email", "number", "url"):
+                    return None
                 return "No"
             if profile_key == "_us":
                 return "United States"
@@ -432,6 +560,12 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
                 # For radios/checkboxes with a single agreement option, _best_option_match
                 # will substring-pick whatever "agree" option exists.
                 return "I have read and agree"
+            if profile_key == "_end_date":
+                # Employment-history End Date. If still in the role return
+                # "Present"; otherwise leave blank for the LLM.
+                if profile.get("currently_employed"):
+                    return "Present"
+                return None
             # Special case: full name
             if profile_key == "_full_name":
                 first = profile.get("first_name", "")
@@ -551,6 +685,19 @@ async def fill_field(page: Page, field: FormField, value: str):
         if field.field_type in ("text", "tel", "email", "number", "url"):
             el = await page.query_selector(field.selector)
             if el:
+                # Inspect the actual DOM — some text inputs declare
+                # `inputmode="numeric"` and reject any non-digit content
+                # (e.g. Indeed's "Phone Number" with +/-/spaces in value).
+                inputmode = await el.get_attribute("inputmode") or ""
+                el_type = await el.get_attribute("type") or ""
+                pattern = await el.get_attribute("pattern") or ""
+                if (field.field_type == "number"
+                        or inputmode.lower() == "numeric"
+                        or el_type.lower() == "number"
+                        or "\\d" in pattern):
+                    digits_only = "".join(ch for ch in str(value) if ch.isdigit())
+                    if digits_only:
+                        value = digits_only
                 await el.click()
                 await human_delay(0.2, 0.4)
                 await el.fill("")
@@ -575,7 +722,13 @@ async def fill_field(page: Page, field: FormField, value: str):
                 print(f"    [fill] No matching option for '{value}' in {field.options[:5]}")
 
         elif field.field_type == "radio":
+            # Primary match against the options form_analyzer extracted.
             best = _best_option_match(value, field.options)
+            # If form_analyzer pulled raw values (e.g. "VETERAN_STATUS-6-5")
+            # instead of human labels, _best_option_match can't help. In that
+            # case we fall through to live label extraction below.
+            if not best:
+                best = value  # try matching against radio's actual label text
             if best:
                 # Find the specific radio button whose label matches
                 radios = await page.query_selector_all(field.selector)
@@ -718,6 +871,7 @@ async def click_continue(page: Page) -> bool:
         'button:has-text("Save and Continue")',
         'button:has-text("Review your application")',
         'button:has-text("Review application")',
+        'button:has-text("Apply anyway")',
         'button:has-text("Continue")',
         'button:has-text("Next")',
         'button[aria-label="Continue"]',
@@ -766,9 +920,17 @@ async def click_submit(page: Page) -> bool:
         'button[type="submit"]',
     ]
 
-    # Review pages render the Submit button a beat after navigation; retry with
-    # progressive backoff before declaring the button missing.
-    for attempt in range(4):
+    # Review pages render the Submit button a beat after navigation. Wait for
+    # network idle to give React a chance to finish rendering before polling.
+    try:
+        await page.wait_for_load_state("networkidle", timeout=6000)
+    except Exception:
+        pass
+    await human_delay(1.5, 2.5)
+
+    # Retry with progressive backoff. Doubled vs prior version because some
+    # employer-customized review pages take 15-20s to mount the Submit button.
+    for attempt in range(8):
         for selector in selectors:
             try:
                 btn = await page.query_selector(selector)
@@ -784,7 +946,7 @@ async def click_submit(page: Page) -> bool:
                     return True
             except Exception:
                 continue
-        if attempt < 3:
+        if attempt < 7:
             await human_delay(2, 3)
 
     print("  [form] No Submit button found")
@@ -958,8 +1120,51 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                 all_answers["resume"] = resume_path
                 continue
 
-            # Skip already-filled fields (Indeed pre-fills from profile)
+            # Pre-filled fields (Indeed remembers prior answers via "Save my
+            # answers"). Trust these UNLESS our deterministic FIELD_MAP /
+            # guard logic disagrees — past hallucinations get re-saved by
+            # Indeed and re-served on future runs, and we want to overwrite.
+            # If the pre-filled value already exceeds the field's max length,
+            # treat it as needing a fresh LLM answer with the cap respected.
+            if (field.current_value and field.max_length
+                    and len(field.current_value) > field.max_length):
+                print(f"    [override] Pre-filled value {len(field.current_value)}c exceeds "
+                      f"limit {field.max_length}c — re-generating")
+                field.current_value = ""  # let normal fill path handle it
+
             if field.current_value and field.field_type not in ("radio", "checkbox"):
+                guard_value = map_field_to_profile(field, user_profile, job_data)
+                # Refuse override when the guard returned a boolean (Yes/No)
+                # but the existing pre-fill is clearly a typed value (phone,
+                # email, address, zip) — the FIELD_MAP keyword match was
+                # incidental and would destroy good data. e.g. a phone field
+                # labeled "Enter number to receive text messages" matches the
+                # SMS-consent pattern but actually needs the phone number.
+                _gv = str(guard_value or "").strip().lower()
+                _cv = field.current_value.strip()
+                is_boolean_guard = _gv in ("yes", "no", "true", "false")
+                is_typed_field = bool(_cv) and (
+                    any(ch.isdigit() for ch in _cv) or "@" in _cv
+                    or len(_cv) > 20
+                )
+                if is_boolean_guard and is_typed_field:
+                    safe_label = field.label_text[:40]
+                    print(f"    [skip] Pre-filled (refused boolean override): {safe_label} = {_cv[:30]}")
+                    field_inventory.record_handler(field, "prefilled")
+                    continue
+                if (
+                    guard_value is not None
+                    and guard_value != "__SKIP__"
+                    and str(guard_value).strip().lower() != field.current_value.strip().lower()
+                ):
+                    safe_label = field.label_text[:40]
+                    safe_old = field.current_value[:30]
+                    safe_new = str(guard_value)[:30]
+                    print(f"    [override] Pre-filled {safe_label}: {safe_old!r} -> {safe_new!r}")
+                    await fill_field(page, field, guard_value)
+                    all_answers[field.label_text or field.name] = guard_value
+                    field_inventory.record_handler(field, "keyword", value=guard_value)
+                    continue
                 safe_label = field.label_text[:40]
                 safe_val = field.current_value[:30]
                 print(f"    [skip] Pre-filled: {safe_label} = {safe_val}")
@@ -984,7 +1189,26 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                     user_profile=user_profile,
                     job_data=job_data,
                     model=model,
+                    max_length=field.max_length,
                 )
+                # If the LLM still overshoots the field's maxLength, re-ask
+                # with a stricter target. Mistral occasionally ignores the
+                # first instruction; a second pass with a smaller cap usually
+                # works.
+                if (value and field.max_length
+                        and len(str(value)) > field.max_length):
+                    print(f"    [llm] Answer {len(value)}c exceeds limit "
+                          f"{field.max_length}c — re-asking with tighter cap")
+                    tighter_cap = max(50, int(field.max_length * 0.6))
+                    value = answer_question(
+                        question=field.label_text + f" (Be brief — under {tighter_cap} characters total)",
+                        field_type=field.field_type,
+                        options=field.options,
+                        user_profile=user_profile,
+                        job_data=job_data,
+                        model=model,
+                        max_length=tighter_cap,
+                    )
                 if value is not None:
                     handler = "llm"
 
@@ -1071,7 +1295,14 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                         or "date format" in (inv.get("error") or "").lower()
                     )
                     if is_date_field:
-                        sel = f'#{inv["id"]}' if inv["id"] else f'[name="{inv["name"]}"]'
+                        # Use attribute selectors — Indeed ids contain colons
+                        # (e.g. ":r3i:") which break `#id` syntax without escaping.
+                        if inv["id"]:
+                            safe_id = inv["id"].replace('"', '\\"')
+                            sel = f'[id="{safe_id}"]'
+                        else:
+                            safe_name = (inv["name"] or "").replace('"', '\\"')
+                            sel = f'[name="{safe_name}"]'
                         try:
                             el = await page.query_selector(sel)
                             if el:
@@ -1082,6 +1313,87 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                                 print(f"    [repair] {inv['name']}: re-filled with today's date")
                         except Exception as e:
                             print(f"    [repair] {inv['name']}: {e}")
+                    elif "shorter than" in (inv.get("error") or "").lower() or "must be" in (inv.get("error") or "").lower() and "character" in (inv.get("error") or "").lower():
+                        import re as _re
+                        err = inv.get("error") or ""
+                        m = _re.search(r"(\d+)\s*character", err)
+                        cap = int(m.group(1)) if m else 75
+                        # Find this field's label via DOM and re-prompt LLM with the cap.
+                        try:
+                            name = inv.get("name") or ""
+                            safe_name = name.replace('"', '\\"')
+                            label_text = await page.evaluate(
+                                "(n) => {"
+                                "  const el = document.querySelector('[name=\"' + n + '\"]');"
+                                "  if (!el) return '';"
+                                "  if (el.labels && el.labels[0]) return el.labels[0].textContent.trim();"
+                                "  if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');"
+                                "  return '';"
+                                "}",
+                                safe_name,
+                            )
+                            if label_text:
+                                shorter = answer_question(
+                                    question=label_text + f" (Be brief — under {cap} characters total)",
+                                    field_type="text",
+                                    options=[],
+                                    user_profile=user_profile,
+                                    job_data=job_data,
+                                    model=model,
+                                    max_length=cap,
+                                )
+                                if shorter:
+                                    sel = f'[name="{safe_name}"]'
+                                    el = await page.query_selector(sel)
+                                    if el:
+                                        await el.click(timeout=2000)
+                                        await el.fill("")
+                                        await el.fill(str(shorter)[:cap])
+                                        await human_delay(0.3, 0.6)
+                                        print(f"    [repair] {name}: re-filled with shorter answer ({len(str(shorter))}c, cap {cap})")
+                        except Exception as e:
+                            print(f"    [repair] length-error fix failed: {e}")
+                    elif "choose an option" in (inv.get("error") or "").lower():
+                        # An unfilled required radio/select. If the group has a
+                        # Yes option (or is named "terms"/"agree"/"consent"),
+                        # picking Yes is the right safe default — it's almost
+                        # always an agreement / opt-in question.
+                        name = inv.get("name") or ""
+                        try:
+                            picked = await page.evaluate("""(name) => {
+                                if (!name) return false;
+                                const radios = document.querySelectorAll(
+                                    'input[type="radio"][name="' + name.replace(/"/g, '\\\\"') + '"]'
+                                );
+                                if (!radios.length) return false;
+                                // Find a radio whose label text is "Yes"
+                                for (const r of radios) {
+                                    const lbl = (r.labels && r.labels[0])
+                                        ? r.labels[0].textContent.trim().toLowerCase()
+                                        : '';
+                                    if (lbl === 'yes') {
+                                        r.click();
+                                        r.checked = true;
+                                        r.dispatchEvent(new Event('change', {bubbles:true}));
+                                        return true;
+                                    }
+                                }
+                                // Single-option group — just pick the first.
+                                if (radios.length === 1) {
+                                    radios[0].click();
+                                    radios[0].checked = true;
+                                    radios[0].dispatchEvent(new Event('change', {bubbles:true}));
+                                    return true;
+                                }
+                                return false;
+                            }""", name)
+                            if picked:
+                                await human_delay(0.3, 0.6)
+                                print(f"    [repair] {name}: picked Yes for unfilled required radio")
+                            else:
+                                print(f"    [warn] invalid field {name} ({inv.get('error')}) — couldn't pick Yes")
+                        except Exception as e:
+                            print(f"    [repair] {name}: {e}")
                     else:
                         print(f"    [warn] invalid field {inv.get('name')} ({inv.get('error') or 'no error text'}) — no repair rule")
         except Exception as e:

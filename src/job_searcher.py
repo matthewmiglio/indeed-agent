@@ -63,11 +63,13 @@ async def search_indeed(page: Page, query: str, location: str = None,
             print(f"  [search] WARNING: Cloudflare challenge detected (title={title!r}).")
             print(f"  [search] Pause and pass the verification in the browser, "
                   f"or wait 15-30 min for the rate-limit to relax.")
-            # Give the user up to 60s to click the challenge manually before continuing.
+            # Give the user up to 3 minutes to click the challenge manually
+            # before continuing (Cloudflare's JS challenge can take 5-15s to
+            # render the checkbox, plus human reaction time).
             await page.wait_for_function(
                 "document.title && !document.title.toLowerCase().includes('just a moment') "
                 "&& !document.title.toLowerCase().includes('verifying')",
-                timeout=60_000,
+                timeout=180_000,
             )
             print(f"  [search] Challenge cleared — continuing.")
     except Exception as e:

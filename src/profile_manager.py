@@ -71,6 +71,13 @@ DATUMS = {
     # Preferences (additional)
     "desired_hourly_rate": {"prompt": "Desired hourly rate (e.g. 20 or 18-25) — optional, leave blank if salary is preferred", "type": "str", "required": False, "category": "Preferences"},
     "availability":        {"prompt": "Availability (e.g. 'Monday-Friday, 8am-5pm' or 'flexible')", "type": "str", "required": False, "category": "Preferences"},
+
+    # Current/most-recent employment details (used by Indeed forms that ask
+    # for an employment-history block).
+    "current_employer_city":  {"prompt": "City where your current/most-recent employer is located", "type": "str", "required": False, "category": "Experience"},
+    "current_employer_state": {"prompt": "State (abbreviation) where your current/most-recent employer is located", "type": "str", "required": False, "category": "Experience"},
+    "current_job_start_date": {"prompt": "Start date for current/most-recent job (MM/DD/YYYY)", "type": "str", "required": False, "category": "Experience"},
+    "currently_employed":     {"prompt": "Are you currently employed at this job? (yes/no)", "type": "bool", "required": False, "category": "Experience"},
 }
 
 

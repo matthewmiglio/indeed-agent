@@ -49,7 +49,8 @@ Return ONLY valid JSON:
 
 
 def answer_question(question: str, field_type: str, options: list[str],
-                    user_profile: dict, job_data: dict, model: str = "mistral") -> str | None:
+                    user_profile: dict, job_data: dict, model: str = "mistral",
+                    max_length: int = 0) -> str | None:
     """Generate an answer for a custom screening question.
 
     Args:
@@ -81,6 +82,16 @@ def answer_question(question: str, field_type: str, options: list[str],
         options_text = f"\nAvailable choices: {', '.join(options)}"
         options_text += "\nYou MUST pick exactly one of the above choices."
 
+    length_text = ""
+    if max_length and max_length > 0:
+        # Aim for ~80% of the limit to leave headroom for variation; never go over.
+        target = int(max_length * 0.8)
+        length_text = (
+            f"\n\nIMPORTANT: This field has a HARD character limit of {max_length} characters. "
+            f"Your answer MUST be {target} characters or fewer. "
+            f"Count carefully and prioritize the most relevant sentences if you need to cut."
+        )
+
     prompt = f"""Candidate Profile:
 {profile_text}
 
@@ -90,7 +101,7 @@ Company: {job_data.get('company', 'unknown')}
 Description excerpt: {job_data.get('description', '')[:500]}
 
 Form question: "{question}"
-Field type: {field_type}{options_text}
+Field type: {field_type}{options_text}{length_text}
 
 Provide an appropriate answer for this form field."""
 

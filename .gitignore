@@ -3,6 +3,7 @@ config/settings.yaml
 config/*.local.*
 .claude/
 data/
+docs/
 logs/
 goals/
 *.log
