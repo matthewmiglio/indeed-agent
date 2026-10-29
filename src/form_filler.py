@@ -40,6 +40,12 @@ FIELD_MAP = [
     ("employee referral", "_no"),
     ("referral from", "_no"),
     ("were you referred", "_no"),
+    # Conflict-of-interest screens. Candidate has one current full-time employer
+    # and no side business, so these are No. Deterministic because the LLM
+    # flip-flops (answered Yes then wrote "None." as the required detail).
+    ("outside employment", "_no"),
+    ("outside business", "_no"),
+    ("own business", "_no"),
     ("consent to receive", "_yes"),
     ("informational recruiting", "_yes"),
     # Commute — always Yes. Saying No is an instant auto-decline on most
@@ -133,6 +139,13 @@ FIELD_MAP = [
     ("current date", "_today"),
     ("date signed", "_today"),
     ("signature date", "_today"),
+
+    # Security-clearance ELIGIBILITY (not possession): gated on US citizenship.
+    # Must come before any generic clearance handling. Does NOT match "do you
+    # currently hold" / "select your security clearance" questions.
+    ("eligibility to obtain", "_clearance_eligible"),
+    ("eligible to obtain", "_clearance_eligible"),
+    ("clearance eligibility", "_clearance_eligible"),
 
     # Demographics — most ask voluntary-disclosure questions with standard options.
     ("protected veteran", "_not_veteran"),
@@ -509,7 +522,11 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
     if yrs is not None and field.field_type in ("radio", "select", "checkbox"):
         import re as _re
         m = _re.search(r'(\d+)\s*\+?\s*years', label)
-        if m and any(w in label for w in ("minimum", "at least", "or more",
+        # Exclude AGE questions ("at least 18 years old") — the number is an age,
+        # not a years-of-experience threshold, so comparing it to years_experience
+        # wrongly answers "No" to "Are you at least 18?".
+        is_age = ("years old" in label or "of age" in label or "years of age" in label)
+        if m and not is_age and any(w in label for w in ("minimum", "at least", "or more",
                                           "+ years", "do you have", "more than")):
             try:
                 return "Yes" if int(yrs) >= int(m.group(1)) else "No"
@@ -561,7 +578,12 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
     # are "United States" and "Canada". When we detect that shape, answer with
     # the country instead of the state code, otherwise the field stays empty
     # and the form refuses to advance.
-    if "state" in label or "province" in label:
+    # Guard: "United States" contains "state", so a work-authorization question
+    # ("...authorized to work in the United States") would wrongly match here and
+    # get answered "United States". Exclude those (and any label that literally
+    # contains "united states") — a real State/Province field never does.
+    if (("state" in label or "province" in label)
+            and "united states" not in label and "authorized" not in label):
         opts_blob = " | ".join(field.options).lower()
         country_signals = ("united states", "canada", "united kingdom", "australia")
         if any(c in opts_blob for c in country_signals) and "michigan" not in opts_blob:
@@ -577,16 +599,35 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
         if need is not None:
             return "Yes" if need else "No"
 
+    # Work-authorization questions whose options are full sentences rather than
+    # plain Yes/No (e.g. "I am authorized to work in the United States" vs "I am
+    # not authorized..."). Pick the affirmative option when we're authorized.
+    # Plain Yes/No fields fall through to FIELD_MAP (work_authorized_us -> Yes).
+    if (("authorized to work" in label or "legally authorized" in label
+            or "work authorization" in label)
+            and "sponsor" not in label
+            and field.field_type in ("radio", "select", "combobox") and field.options):
+        if profile.get("work_authorized_us"):
+            for o in field.options:
+                ol = o.lower()
+                if "authorized to work" in ol and "not authorized" not in ol and "not legally" not in ol:
+                    return o
+
     # Veteran self-ID. Phrasing varies ("I am not a protected veteran" vs Infosys's
     # "No, I am not a veteran under one of the classifications"), so pick the actual
     # option that means "not a veteran" rather than returning a fixed string.
     if "veteran" in label and field.field_type in ("radio", "select", "checkbox") and field.options:
-        for pat in ("no, i am not", "not a protected veteran", "i am not a veteran",
-                    "not a veteran", "prefer not", "wish to answer"):
-            for o in field.options:
+        # Exclude options that AFFIRM veteran status before matching. Baker Tilly's
+        # "I IDENTIFY AS A VETERAN, JUST NOT A PROTECTED VETERAN" contains the
+        # substring "not a protected veteran" but asserts being a veteran, so a
+        # naive match picks it. Only ever choose a true negative.
+        negs = [o for o in field.options if "identify as a veteran" not in o.lower()]
+        for pat in ("i am not a veteran", "not a veteran", "no, i am not",
+                    "not a protected veteran", "prefer not", "wish to answer"):
+            for o in negs:
                 if pat in o.lower():
                     return o
-        for o in field.options:
+        for o in negs:
             if o.strip().lower().startswith("no"):
                 return o
 
@@ -704,6 +745,11 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
             if profile_key == "_today":
                 from datetime import date
                 return date.today().strftime("%m/%d/%Y")
+            if profile_key == "_clearance_eligible":
+                # "Eligible to obtain/maintain a U.S. clearance" is gated on US
+                # citizenship (clearances require it); a citizen who can pass a
+                # background check is eligible. NOT "do you currently hold one".
+                return "Yes" if profile.get("us_citizen") else "No"
             if profile_key == "_not_veteran":
                 return profile.get("veteran_status") or "I am not a protected veteran"
             if profile_key == "_no_disability":

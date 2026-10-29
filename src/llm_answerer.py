@@ -19,7 +19,7 @@ Answer by field type:
 - Number field: reply with only the number.
 - Multiple-choice (options given): reply with exactly one of the provided choices, verbatim.
 - Short text: 1-2 concise, professional sentences.
-- Long text (cover letter, "tell us about yourself", "why are you a good fit", comments): 4-6 substantive sentences that tie YOUR actual profile experience to THIS job — name relevant skills, reference the company by name, and state why you are motivated.
+- Long text (cover letter, "tell us about yourself", "why are you a good fit", comments): 4-6 substantive sentences that tie YOUR actual profile experience to THIS job — name relevant skills, reference the company by name, and state why you are motivated. When you write the company name, copy it EXACTLY as given in the Company field, character for character. Never correct, complete, expand, or "fix" an unusual or misspelled-looking company name (e.g. do not change "Brillian" to "Brilliant", or "Discernis" to "Discerns").
 
 Truthfulness (do not violate):
 - Never claim experience, skills, or credentials not in the profile. Do not inflate or round up.
