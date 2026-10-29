@@ -9,6 +9,7 @@ import os
 import asyncio
 import random
 import time
+from collections import deque
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 PROFILE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "browser_profile")
@@ -18,10 +19,26 @@ INDEED_URL = "https://www.indeed.com"
 # Toggle by main.py via --debug; when True, dump_page also fires at non-miss checkpoints
 DEBUG_MODE = False
 
+# Rolling capture of console messages + failed requests for the current browser,
+# so a dump can show WHY a page misbehaved (dead JS, blocked request) and not just
+# the final HTML. Reset each launch_browser(). ponytail: bounded deque, last N only.
+_CONSOLE = deque(maxlen=400)
+_NETFAIL = deque(maxlen=200)
+
+
+def _attach_diagnostics(page: Page):
+    """Record console output, uncaught JS errors, and failed requests on a page."""
+    page.on("console", lambda m: _CONSOLE.append(f"{m.type}: {m.text[:300]}"))
+    page.on("pageerror", lambda e: _CONSOLE.append(f"pageerror: {str(e)[:300]}"))
+    page.on("requestfailed", lambda r: _NETFAIL.append(
+        f"{(r.failure or '')[:80]} {r.method} {r.url[:160]}"))
+
 
 async def launch_browser(headless=False) -> tuple:
     """Launch a persistent Chromium browser with a saved profile (keeps your Indeed login)."""
     os.makedirs(PROFILE_DIR, exist_ok=True)
+    _CONSOLE.clear()
+    _NETFAIL.clear()
     pw = await async_playwright().start()
     context = await pw.chromium.launch_persistent_context(
         PROFILE_DIR,
@@ -29,7 +46,10 @@ async def launch_browser(headless=False) -> tuple:
         viewport={"width": 1280, "height": 900},
         args=["--disable-blink-features=AutomationControlled"],
     )
+    # Attach to the initial page and any page opened later (e.g. smartapply popups).
+    context.on("page", _attach_diagnostics)
     page = context.pages[0] if context.pages else await context.new_page()
+    _attach_diagnostics(page)
     return pw, context, page
 
 
@@ -78,12 +98,41 @@ async def dump_page(page: Page, label: str, force: bool = False) -> str | None:
             f.write(f"<!-- url: {page.url} -->\n")
             f.write(html)
         await page.screenshot(path=png_path, full_page=True)
+        await _dump_diagnostics(page, base + ".log")
         print(f"  [debug] dumped: {html_path}")
         print(f"  [debug] dumped: {png_path}")
     except Exception as e:
         print(f"  [debug] dump failed for '{label}': {e}")
         return None
     return html_path
+
+
+async def _dump_diagnostics(page: Page, path: str):
+    """Write a sidecar .log answering WHY a page looks how it does: live hydration
+    state (readyState, body text length, which key elements actually exist) plus the
+    recent console errors and failed network requests the HTML can't show."""
+    try:
+        state = await page.evaluate(
+            """() => ({
+                readyState: document.readyState,
+                bodyTextLen: (document.body && document.body.innerText || '').length,
+                applyAnchor: !!document.querySelector('#primary-apply-action,[data-testid="viewjob-indeed-apply"],a[href*="smartapply.indeed.com"]'),
+                applyButton: !!document.querySelector('button#indeedApplyButton,button[data-testid="indeedApplyButton"],button.indeed-apply-button'),
+                descNew: !!document.querySelector('[data-testid="vj-job-description-heading"],.simple-job-description'),
+                descOld: !!document.querySelector('#jobDescriptionText'),
+            })"""
+        )
+    except Exception as e:
+        state = {"error": f"evaluate failed (page may be gone): {e}"}
+    errs = [c for c in _CONSOLE if c.startswith(("error", "warning", "pageerror"))]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"url: {page.url}\n")
+        for k, v in state.items():
+            f.write(f"{k}: {v}\n")
+        f.write(f"\n--- failed requests ({len(_NETFAIL)}) ---\n")
+        f.write("\n".join(_NETFAIL) or "(none)")
+        f.write(f"\n\n--- console errors/warnings ({len(errs)} of {len(_CONSOLE)} msgs) ---\n")
+        f.write("\n".join(errs[-60:]) or "(none)")
 
 
 async def screenshot(page: Page, label: str = "snapshot", full_page: bool = True) -> str:

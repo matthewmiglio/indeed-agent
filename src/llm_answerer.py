@@ -1,55 +1,46 @@
+import re
 """LLM-based answering for custom screening questions on job applications.
 
 When a form field doesn't match any known profile datum via keyword mapping,
-this module sends the question + user profile + job context to Mistral to
-generate an appropriate answer.
+this module sends the question + user profile + job context to Claude (Haiku)
+to generate an appropriate answer.
 """
 
 import json
 import time
-import ollama
+from claude_client import chat_json
 
-SYSTEM_PROMPT = """You ARE the candidate filling out a job application form yourself.
-Answer in FIRST PERSON — say "I have…", "I worked…", "My experience…".
-NEVER refer to the candidate in third person (no "Korrah has", no "the candidate",
-no "as the applicant", no agent-speak). Write as if you are the person applying.
+SYSTEM_PROMPT = """You ARE the candidate, filling out this job application yourself. Write in FIRST PERSON — "I have…", "I worked…", "My experience…". Never refer to the candidate in third person and never use agent-speak ("the candidate", "the applicant", "as the AI"). You are the person applying.
 
-Rules:
-- Be concise and professional, in first person
-- For yes/no questions, answer ONLY "Yes" or "No"
-- For short text questions, keep answers to 1-2 sentences
-- For longer text fields (cover letter, "tell us about yourself", "comments", "why are you a good fit"), write 4-6 substantive sentences that tie your actual experience to the specific job — name skills from the posting, reference the company by name, and explain why you're motivated to apply
-- For number fields, return ONLY the number
-- Base all answers on the candidate's actual profile data
-- NEVER fabricate experience or qualifications you don't have
-- CRITICAL — DO NOT confuse the JOB POSTING with the candidate's resume.
-  Phrases like "in my role as a [job title from posting]" are FORBIDDEN if
-  that role does not appear in the candidate's profile. The job posting
-  describes the job being APPLIED TO, not the candidate's history.
-- CRITICAL — for "do you have experience with X" or "do you have [a credential / license / certification]" questions:
-  - Answer "Yes" ONLY if the candidate's profile (skills, certifications,
-    current/past job titles, experience_summary) EXPLICITLY contains X or
-    an obvious synonym (e.g. "caregiving" ≈ "patient care").
-  - Mere keyword overlap with the job description is NOT sufficient.
-  - If you cannot point to a specific profile field that proves X, answer "No".
-  - Certifications/licenses (e.g. "certified medical assistant", "CDL",
-    "RN license") must be in the candidate's `certifications` list to answer Yes.
-- If asked about a specific technology/skill not in your profile,
-  answer "No" for yes/no questions, or mention related experience
-  briefly (1 sentence) for free-form questions — do NOT claim mastery.
-- If you truly cannot answer from the profile, respond with "SKIP"
+Your only source of truth is the candidate profile provided in the user message. The job posting tells you what to tailor toward — it is NOT your history. This is the one rule that matters most: everything you claim must be grounded in a specific profile field.
+
+Answer by field type:
+- Yes/No question: reply exactly "Yes" or "No" — nothing else.
+- Number field: reply with only the number.
+- Multiple-choice (options given): reply with exactly one of the provided choices, verbatim.
+- Short text: 1-2 concise, professional sentences.
+- Long text (cover letter, "tell us about yourself", "why are you a good fit", comments): 4-6 substantive sentences that tie YOUR actual profile experience to THIS job — name relevant skills, reference the company by name, and state why you are motivated.
+
+Truthfulness (do not violate):
+- Never claim experience, skills, or credentials not in the profile. Do not inflate or round up.
+- Never write "in my role as a <title from the posting>" unless that title is in your profile. The posting's title is the job you WANT, not one you held.
+- "Do you have experience with X?" / "Do you hold <license/certification>?": answer "Yes" ONLY if a profile field (skills, certifications, current/past job titles, experience_summary) explicitly contains X or an obvious synonym (e.g. "caregiving" ≈ "patient care"). Keyword overlap with the job description does NOT count. Licenses/certifications must appear in the profile's certifications list. If you can't point to the field, answer "No".
+- Asked about a skill/technology you don't have: "No" for yes/no; for free-form, note related experience in one sentence without claiming mastery.
+- If the profile gives you nothing to answer from, reply with exactly "SKIP".
+
+Respect any character limit stated in the question; stay under it.
 
 Return ONLY valid JSON:
 {
   "answer": "your answer here",
   "confidence": "high" | "medium" | "low",
-  "reasoning": "brief explanation of your answer"
+  "reasoning": "which profile field(s) you based this on"
 }
 """
 
 
 def answer_question(question: str, field_type: str, options: list[str],
-                    user_profile: dict, job_data: dict, model: str = "mistral",
+                    user_profile: dict, job_data: dict, model: str = "claude-haiku-4-5",
                     max_length: int = 0) -> str | None:
     """Generate an answer for a custom screening question.
 
@@ -59,16 +50,22 @@ def answer_question(question: str, field_type: str, options: list[str],
         options: For select/radio fields, the available choices.
         user_profile: Full user profile dict.
         job_data: Current job posting data for context.
-        model: Ollama model name.
+        model: Claude model ID.
 
     Returns:
         The answer string, or None if the LLM cannot answer (SKIP).
     """
+    # Note: experience-threshold questions ("minimum of N years…") are handled
+    # deterministically in form_filler.map_field_to_profile, which runs before
+    # this and also covers the pre-fill override path.
+
     # Build a concise profile summary
     profile_parts = []
     for key in ["first_name", "last_name", "email", "phone", "city", "state",
-                "current_job_title", "years_experience", "experience_summary",
-                "highest_education", "degree_field", "skills", "certifications",
+                "current_job_title", "current_employer", "current_job_start_date",
+                "years_experience", "experience_summary",
+                "highest_education", "degree_field", "school_name", "graduation_year",
+                "skills", "certifications",
                 "desired_salary", "work_type_preference"]:
         val = user_profile.get(key)
         if val is not None and val != "" and val != []:
@@ -109,23 +106,24 @@ Provide an appropriate answer for this form field."""
     print(f"  [llm] Answering: \"{safe_q}\"")
     t0 = time.time()
 
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        format="json",
-    )
-
-    elapsed = time.time() - t0
-    raw = response["message"]["content"]
-    tokens = response.get("eval_count", "?")
-    print(f"  [llm] Responded in {elapsed:.1f}s ({tokens} tokens)")
-
-    result = json.loads(raw)
+    # The model (or CLI transport) occasionally returns an empty string or a
+    # non-JSON blob. Retry once, then give up gracefully — a single bad reply
+    # must not crash the whole application run. Returning None leaves the field
+    # for the caller to report as unhandled.
+    result = None
+    for attempt in range(2):
+        raw, tokens = chat_json(SYSTEM_PROMPT, prompt, model=model)
+        print(f"  [llm] Responded in {time.time() - t0:.1f}s ({tokens} tokens)")
+        try:
+            result = json.loads(raw)
+            break
+        except (json.JSONDecodeError, TypeError):
+            print(f"  [llm] non-JSON/empty reply (attempt {attempt + 1}/2): {str(raw)[:60]!r}")
+    if result is None:
+        print("  [llm] giving up on this question after 2 bad replies")
+        return None
     raw_answer = result.get("answer", "")
-    # Mistral sometimes returns a list (e.g. ["Yes"]) or a dict; coerce to string.
+    # The model sometimes returns a list (e.g. ["Yes"]) or a dict; coerce to string.
     if isinstance(raw_answer, list):
         raw_answer = ", ".join(str(x) for x in raw_answer) if raw_answer else ""
     elif isinstance(raw_answer, dict):

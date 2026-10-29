@@ -204,6 +204,26 @@ async def analyze_form_page(page: Page) -> list[FormField]:
             });
         }
 
+        // Custom RN-Web dropdowns (Indeed apply-questions render SELECT questions as
+        // <div role="combobox"> with no native <select>, so the scan above misses them).
+        // Options only exist once opened, so we emit the control; the filler opens it.
+        document.querySelectorAll('[role="combobox"]').forEach(el => {
+            if (!el.offsetParent) return;
+            const testid = el.getAttribute('data-testid') || '';
+            const key = el.id || testid;
+            if (key && seen.has(key)) return;
+            if (key) seen.add(key);
+            let selector = el.id ? '#' + CSS.escape(el.id)
+                         : (testid ? '[data-testid="' + testid + '"]' : '');
+            if (!selector) return;
+            const label = getLabel(el);
+            fields.push({
+                id: el.id || '', name: testid, type: 'combobox', label: label,
+                required: el.getAttribute('aria-required') === 'true' || /\*/.test(label || ''),
+                value: '', options: [], placeholder: '', selector: selector, max_length: 0
+            });
+        });
+
         return fields;
     }""")
 
@@ -240,9 +260,10 @@ async def is_review_page(page: Page) -> bool:
     if "/review-module" in page.url.lower() or "/review/" in page.url.lower():
         return True
     indicators = await page.evaluate("""() => {
-        // Only a button explicitly labelled "Submit your application" counts —
-        // generic Continue/Save buttons must not be misread as Submit.
-        const submitBtns = Array.from(document.querySelectorAll('button'));
+        // Only a control explicitly labelled "Submit your application" counts —
+        // generic Continue/Save buttons must not be misread as Submit. Smartapply
+        // renders these as React-Native-Web <div role="button">, so scan those too.
+        const submitBtns = Array.from(document.querySelectorAll('button, [role="button"]'));
         return submitBtns.some(b => {
             const t = (b.textContent || '').trim().toLowerCase();
             return b.id === 'form-action-submit' ||

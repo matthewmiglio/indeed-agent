@@ -275,7 +275,8 @@ async def extract_job_details(page: Page) -> dict:
     # Wait for the job description to render
     try:
         await page.wait_for_selector(
-            '#jobDescriptionText, div.jobsearch-JobComponent-description',
+            '#jobDescriptionText, div.jobsearch-JobComponent-description, '
+            '.simple-job-description, [data-testid="vj-job-description-heading"]',
             timeout=10000
         )
         await human_delay(1, 2)
@@ -297,6 +298,7 @@ async def extract_job_details(page: Page) -> dict:
 
         // Title
         const titleEl = document.querySelector(
+            '[data-testid="vj-job-title"], ' +
             'h1.jobsearch-JobInfoHeader-title, ' +
             'h2.jobsearch-JobInfoHeader-title, ' +
             'div[data-testid="jobsearch-JobInfoHeader-title"], ' +
@@ -306,6 +308,8 @@ async def extract_job_details(page: Page) -> dict:
 
         // Company
         const companyEl = document.querySelector(
+            '[data-testid="company-info-metadata"] a, ' +
+            '[data-testid="company-info-metadata"], ' +
             'div[data-testid="inlineHeader-companyName"] a, ' +
             'div.jobsearch-InlineCompanyRating a, ' +
             'span.companyName a'
@@ -342,7 +346,8 @@ async def extract_job_details(page: Page) -> dict:
         // Full description
         const descEl = document.querySelector(
             '#jobDescriptionText, ' +
-            'div.jobsearch-JobComponent-description'
+            'div.jobsearch-JobComponent-description, ' +
+            '.simple-job-description'
         );
         if (descEl) result.description = descEl.innerText.trim();
 

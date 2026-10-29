@@ -21,6 +21,7 @@ from typing import Any
 DEBUG_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "debug")
 INVENTORY_PATH = os.path.join(DEBUG_DIR, "field_inventory.jsonl")
 UNHANDLED_PATH = os.path.join(DEBUG_DIR, "unhandled_fields.jsonl")
+UNHANDLED_REQUIRED_PATH = os.path.join(DEBUG_DIR, "unhandled_required.jsonl")
 SUMMARY_PATH = os.path.join(DEBUG_DIR, "run_summary.json")
 
 
@@ -133,6 +134,17 @@ def record_handler(field_obj: Any, handler: str, value: Any = None):
             fh.write(json.dumps(rec) + "\n")
     elif handler == "unhandled" and field_obj.required:
         _STATS.unhandled_required += 1
+        # Persist full details of every required field we couldn't answer, so
+        # the debug loop knows exactly what to map / add to the profile.
+        rec = {
+            "label": field_obj.label_text,
+            "type": field_obj.field_type,
+            "options": field_obj.options,
+            "selector": field_obj.selector,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with open(UNHANDLED_REQUIRED_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
 
 
 def record_job_start():

@@ -1,0 +1,43 @@
+{
+  "name": "JANE DOE",
+  "contact": [
+    { "text": "jane.doe@example.com" },
+    { "text": "(555)123-4567" },
+    { "text": "GitHub", "url": "https://github.com/janedoe", "icon": "../assets/github.png" },
+    { "text": "LinkedIn", "url": "https://www.linkedin.com/in/janedoe", "icon": "../assets/linkedin.png" },
+    { "text": "Personal Site", "url": "https://janedoe.example.com", "icon": "../assets/globe.png" }
+  ],
+  "title": "Full-Stack Software Engineer",
+  "summary": "One- or two-sentence professional summary. Use **double asterisks** to bold key terms; the renderer italicizes this line.",
+  "sections": [
+    {
+      "heading": "EDUCATION",
+      "type": "entries",
+      "items": [
+        { "place": "Example University, City, ST - Bachelor's in Computer Science" }
+      ]
+    },
+    {
+      "heading": "PROFESSIONAL EXPERIENCE",
+      "type": "entries",
+      "items": [
+        {
+          "place": "Example Corp — Software Engineer",
+          "date": "Jan 2024 – Present",
+          "bullets": [
+            "Achievement bullet with **bolded** key technologies and a measurable outcome.",
+            "Another bullet. List roles in reverse-chronological order (most recent first)."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "TECHNICAL SKILLS & TOOLS",
+      "type": "skills",
+      "items": [
+        { "label": "Languages & Frameworks", "value": "Python, JavaScript, TypeScript, React, SQL" },
+        { "label": "Cloud & DevOps", "value": "AWS, Docker, CI/CD, GitHub Actions" }
+      ]
+    }
+  ]
+}

@@ -17,7 +17,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 from agent import run_agent
 from browser import login_session
 from profile_manager import collect_all, print_status, load_profile, check_completeness
-from ollama_manager import ensure_ollama_ready
 
 BANNER = """
  ___                    ___ _
@@ -60,9 +59,54 @@ def parse_dry_run_flag(args: list[str]) -> tuple[bool, list[str]]:
     return False, args
 
 
+def parse_no_tune_flag(args: list[str]) -> tuple[bool, list[str]]:
+    """Extract --no-tune flag. Returns (tune_enabled, remaining_args)."""
+    if "--no-tune" in args:
+        return False, [a for a in args if a != "--no-tune"]
+    return True, args
+
+
+def preflight_warnings():
+    """Print LOUD warnings for any unmet setup prerequisite. Never blocks.
+
+    The three setup steps are: (1) profile questionnaire, (2) skills builder,
+    (3) Indeed login. Any run is allowed to proceed even if some are missing —
+    we just warn loudly so the user knows why it may misbehave.
+    """
+    import browser
+    profile = load_profile()
+    problems = []
+
+    _, _, missing = check_completeness(profile)
+    if missing:
+        problems.append(
+            f"PROFILE INCOMPLETE - {len(missing)} required field(s) missing: "
+            f"{', '.join(missing)}.  Fix:  python src/main.py profile")
+
+    if not profile.get("non_skills"):
+        problems.append(
+            "SKILLS NOT BUILT - no `non_skills` denylist in your profile. Tuned "
+            "resumes may claim skills you don't have.  Fix:  python src/main.py skills")
+
+    prof_dir = browser.PROFILE_DIR
+    logged_in = os.path.isdir(prof_dir) and any(os.scandir(prof_dir))
+    if not logged_in:
+        problems.append(
+            "NOT LOGGED INTO INDEED - no saved browser session. Applications will "
+            "fail to submit.  Fix:  python src/main.py login")
+
+    if problems:
+        bar = "!" * 66
+        print("\n" + bar)
+        print("  SETUP WARNING - proceeding anyway, but these are NOT ready:")
+        for p in problems:
+            print(f"    - {p}")
+        print(bar + "\n")
+
+
 def main():
     """Parse CLI args and run the appropriate mode."""
-    model = "mistral"
+    model = "claude-haiku-4-5"
     args = sys.argv[1:]
 
     # Login mode
@@ -75,9 +119,29 @@ def main():
         collect_all()
         return
 
+    # Skills questionnaire mode (setup step 2) — web UI that builds the
+    # skills allowlist + non_skills denylist into the profile.
+    if args and args[0] == "skills":
+        from skills_questionnaire import serve
+        try:
+            serve(apply=True)  # stops itself once you click Save
+        except KeyboardInterrupt:
+            print("\nSkills questionnaire closed.")
+        return
+
+    # Profile questionnaire GUI (web equivalent of `profile`).
+    if args and args[0] == "profile-gui":
+        from profile_questionnaire import serve_profile
+        try:
+            serve_profile()  # stops itself once you click Save
+        except KeyboardInterrupt:
+            print("\nProfile questionnaire closed.")
+        return
+
     # Extract --debug, --dry-run, and --resume flags if present
     debug, args = parse_debug_flag(args)
     dry_run, args = parse_dry_run_flag(args)
+    tune, args = parse_no_tune_flag(args)
     if debug:
         import browser
         browser.DEBUG_MODE = True
@@ -93,25 +157,17 @@ def main():
     if remaining_args:
         prompt = " ".join(remaining_args)
 
-        ensure_ollama_ready([model])
-
-        # Quick profile check
-        filled, total, missing = check_completeness()
-        if missing:
-            print(f"\n  WARNING: Profile incomplete ({filled}/{total}). Missing: {', '.join(missing)}")
-            print(f"  Run 'python src/main.py profile' to fill in missing data.\n")
-            answer = input("  Continue anyway? (yes/no): ").strip().lower()
-            if answer not in ("yes", "y"):
-                return
+        # Loud, non-blocking setup check — warns but always proceeds.
+        preflight_warnings()
 
         print(f"\n> {prompt}\n")
-        asyncio.run(run_agent(prompt, resume_path=resume_path, model=model, dry_run=dry_run))
+        asyncio.run(run_agent(prompt, resume_path=resume_path, model=model, dry_run=dry_run, tune=tune))
         return
 
     # Interactive mode
     print(BANNER)
-    ensure_ollama_ready([model])
     print_status()
+    preflight_warnings()
     print()
 
     while True:
@@ -132,7 +188,7 @@ def main():
             continue
 
         print()
-        asyncio.run(run_agent(prompt, resume_path=resume_path, model=model))
+        asyncio.run(run_agent(prompt, resume_path=resume_path, model=model, tune=tune))
         print()
 
 

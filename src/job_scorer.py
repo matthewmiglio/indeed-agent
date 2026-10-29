@@ -1,38 +1,39 @@
 """Job posting scorer that evaluates how well a listing matches the candidate.
 
-Sends job data plus the user's profile and search criteria to a local Ollama
-model, which returns a 0-100 score and a pass/fail verdict.
+Sends job data plus the user's profile and search criteria to Claude (Haiku),
+which returns a 0-100 score and a pass/fail verdict.
 """
 
 import json
 import time
-import ollama
+from claude_client import chat_json
 
-SYSTEM_PROMPT = """You are a job match evaluator for an Indeed job application agent.
-Given a job posting and a candidate's profile, score the match from 0 to 100
-and decide if the candidate should apply.
+SYSTEM_PROMPT = """You evaluate how well ONE Indeed job posting matches a candidate, for an automated application agent. Your verdict gates whether the agent actually applies, so be decisive and calibrated — judge only on the profile and criteria given, and never assume qualifications the candidate did not state.
 
 Return ONLY valid JSON:
 {
   "score": number 0-100,
-  "pass": true/false,
-  "reasoning": "brief explanation"
+  "pass": true | false,
+  "reasoning": "one or two sentences naming the deciding factor"
 }
 
-HARD RULES — these always result in pass: false:
-- If the job requires skills the candidate clearly does not have and cannot learn quickly, FAIL.
-- If the job is in a completely different field from the candidate's experience, FAIL.
-- If salary is listed and is significantly below the candidate's minimum, FAIL.
-- If the candidate specified exclusions and the job matches an exclusion, FAIL.
-- If the job requires a specific license/certification the candidate doesn't have, FAIL.
+Step 1 — hard rules. If ANY of these fire, set pass=false regardless of score:
+- The job requires core skills the candidate clearly lacks and could not learn quickly.
+- The job is in a different field from the candidate's experience.
+- A salary is listed and is meaningfully below the candidate's stated minimum.
+- The job matches one of the candidate's exclusions.
+- The job requires a license/certification the candidate does not hold.
 
-Scoring guidelines (for listings that pass hard rules):
-- Strong skill match = higher score
-- Matching experience level = higher score
-- Location/remote preference match = higher score
-- Good salary relative to expectations = higher score
-- Well-known or reputable company = slight boost
-- Vague or suspiciously generic posting = lower score
+Set pass=false whenever a hard rule fires. If NO hard rule fires, set pass=true; a numeric cutoff is applied downstream, so you do not decide the threshold — just score honestly.
+
+Step 2 — score the match on this scale:
+- 80-100: strong skill and experience-level fit; location/remote and salary aligned.
+- 60-79: solid fit with only minor gaps.
+- 40-59: weak or uncertain fit (partial skill match, vague posting).
+- 0-39: poor fit.
+Adjustments: reputable/well-known company -> small boost; vague, generic, or spammy posting -> lower.
+
+When information is missing, do not penalize as if it were a negative — score on what is present and say so in the reasoning. Return ONLY the JSON.
 """
 
 
@@ -65,14 +66,17 @@ def _build_profile_summary(profile: dict) -> str:
     return "\n".join(parts)
 
 
-def score_job(job_data: dict, profile: dict, criteria: dict, model: str = "mistral") -> dict:
+def score_job(job_data: dict, profile: dict, criteria: dict, model: str = "claude-haiku-4-5",
+              min_score: int = 60) -> dict:
     """Score a job posting against the candidate's profile and search criteria.
 
     Args:
         job_data: Extracted job details (title, company, description, etc.).
         profile: User profile dict from profile_manager.
         criteria: Parsed intent dict from the prompt parser.
-        model: Ollama model name for evaluation.
+        model: Claude model ID for evaluation.
+        min_score: Score cutoff to pass. Final pass = model didn't fail a hard
+            rule AND score >= min_score. Tune per run without editing the prompt.
 
     Returns:
         Dict with 'score' (0-100), 'pass' (bool), and 'reasoning' (str).
@@ -110,18 +114,9 @@ Description:
         print(f"  [scorer] Exclusions: {exclusions}")
     t0 = time.time()
 
-    response = ollama.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        format="json",
-    )
+    raw, tokens = chat_json(SYSTEM_PROMPT, prompt, model=model)
 
     elapsed = time.time() - t0
-    raw = response["message"]["content"]
-    tokens = response.get("eval_count", "?")
     safe_raw = raw.encode("ascii", errors="replace").decode("ascii")
     print(f"  [scorer] Model responded in {elapsed:.1f}s ({tokens} tokens)")
     print(f"  [scorer] Raw output: {safe_raw}")
@@ -130,6 +125,21 @@ Description:
     result.setdefault("score", 50)
     result.setdefault("pass", True)
     result.setdefault("reasoning", "")
+
+    # Hard-rule fail from the model stays a fail; otherwise gate on the score cutoff.
+    result["pass"] = bool(result["pass"]) and result["score"] >= min_score
+
+    # Deterministic salary floor (user policy): if a minimum salary was specified
+    # and this posting lists NO salary, dump it — we can't confirm it clears the
+    # floor. Only applies when the user actually set a floor; otherwise unposted
+    # pay is fine and goes to the model's judgment above.
+    sal = str(job_data.get("salary") or "").strip()
+    if criteria.get("salary_min") and not sal:
+        result["pass"] = False
+        result["reasoning"] = (
+            f"No salary listed and a minimum of ${criteria['salary_min']} was required, "
+            "so this unposted-pay job is skipped. " + result.get("reasoning", "")
+        ).strip()
 
     verdict = "PASS" if result["pass"] else "FAIL"
     safe_reasoning = result["reasoning"].encode("ascii", errors="replace").decode("ascii")

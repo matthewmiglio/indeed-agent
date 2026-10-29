@@ -6,7 +6,9 @@ missing datums.
 """
 
 import os
+import re
 import yaml
+from datetime import date
 
 PROFILE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "user_profile.yaml")
 
@@ -17,14 +19,18 @@ DATUMS = {
     "last_name":        {"prompt": "Last name", "type": "str", "required": True, "category": "Personal"},
     "email":            {"prompt": "Email address", "type": "str", "required": True, "category": "Personal"},
     "phone":            {"prompt": "Phone number", "type": "str", "required": True, "category": "Personal"},
+    "street_address":   {"prompt": "Street address (e.g. '123 Main St')", "type": "str", "required": True, "category": "Personal"},
     "city":             {"prompt": "City", "type": "str", "required": True, "category": "Personal"},
     "state":            {"prompt": "State (abbreviation, e.g. NY)", "type": "str", "required": True, "category": "Personal"},
     "zip_code":         {"prompt": "ZIP code", "type": "str", "required": True, "category": "Personal"},
-    "home_address":     {"prompt": "Full home address (e.g. '123 Main St, Springfield, IL 62704')", "type": "str", "required": True, "category": "Personal"},
+    # home_address is NOT collected: it is DERIVED from the parts above by
+    # sync_derived_fields (street, city, "STATE ZIP"). The agent pulls the parts
+    # OR the combined home_address depending on the form field.
 
     # Work authorization
     "work_authorized_us": {"prompt": "Authorized to work in the US? (yes/no)", "type": "bool", "required": True, "category": "Work Auth"},
     "sponsorship_needed": {"prompt": "Will you require visa sponsorship? (yes/no)", "type": "bool", "required": True, "category": "Work Auth"},
+    "us_citizen": {"prompt": "Are you a U.S. citizen? (yes/no) — some jobs require it; answered truthfully, never assumed", "type": "bool", "required": True, "category": "Work Auth"},
 
     # Experience
     "years_experience":   {"prompt": "Total years of professional experience", "type": "int", "required": True, "category": "Experience"},
@@ -47,15 +53,15 @@ DATUMS = {
     "work_type_preference": {"prompt": "Work type preference (remote / hybrid / onsite / any)", "type": "str", "required": False, "category": "Preferences"},
     "linkedin_url":       {"prompt": "LinkedIn URL (or 'none')", "type": "str", "required": False, "category": "Personal"},
 
+    # NOTE: no default-resume datum by design. A fresh resume is tuned per job
+    # (resume_tuner.build_tuned_resume); we never upload a static default PDF.
+
     # Common screening defaults
     "has_drivers_license":          {"prompt": "Do you have a valid driver's license? (yes/no)", "type": "bool", "required": False, "category": "Screening"},
     "has_reliable_transportation":  {"prompt": "Do you have reliable transportation? (yes/no)", "type": "bool", "required": False, "category": "Screening"},
     "can_pass_background_check":    {"prompt": "Can you pass a background check? (yes/no)", "type": "bool", "required": False, "category": "Screening"},
     "can_pass_drug_test":           {"prompt": "Can you pass a drug test? (yes/no)", "type": "bool", "required": False, "category": "Screening"},
     "is_18_or_older":               {"prompt": "Are you 18 years or older? (yes/no)", "type": "bool", "required": False, "category": "Screening"},
-
-    # Resume
-    "resume_path":  {"prompt": "Path to your default resume PDF", "type": "str", "required": False, "category": "Resume"},
 
     # Demographics (used by voluntary self-identification questions on many job
     # applications). All optional — if left blank, the LLM falls back to a
@@ -112,8 +118,92 @@ def load_profile() -> dict:
     return data
 
 
+# Canonical work-history schema: profile["work_history"] is a list of jobs,
+# MOST RECENT FIRST, each a dict with any of these string keys:
+#   job_title, employer, location ("City, State"), start_date, end_date, summary
+# It is the source of truth for employment history; the flat "current_*" fields
+# below are derived from work_history[0] so form_filler (which reads the flat
+# fields) needs no knowledge of the list.
+WORK_HISTORY_KEYS = ("job_title", "employer", "location", "start_date", "end_date", "summary")
+
+
+def _parse_month(s: str):
+    """Parse 'MM/YYYY' or 'YYYY' -> (year, month). Open/present/blank -> None."""
+    s = (s or "").strip().lower()
+    if s in ("", "present", "current", "now", "ongoing"):
+        return None
+    m = re.search(r"(\d{1,2})[/-](\d{4})", s)
+    if m:
+        return (int(m.group(2)), int(m.group(1)))
+    m = re.search(r"\b(\d{4})\b", s)
+    if m:
+        return (int(m.group(1)), 12)
+    return None
+
+
+def sync_derived_fields(profile: dict) -> dict:
+    """Backfill the flat 'current job' fields + employer_locations from work_history.
+
+    work_history is the source of truth for employment history. The "current"
+    job is the one with the latest end date (an open/'present'/future end counts
+    as most current), NOT list order.
+
+    Also derives the combined home_address from the individual street/city/state/
+    zip parts, so the agent can fill either a full-address field or a part field.
+    """
+    # --- Combined home address from parts (always) ---
+    street = (profile.get("street_address") or "").strip()
+    city = (profile.get("city") or "").strip()
+    state = (profile.get("state") or "").strip()
+    zc = str(profile.get("zip_code") or "").strip()
+    if street or city or state or zc:
+        tail = f"{state} {zc}".strip()
+        profile["home_address"] = ", ".join(s for s in (street, city, tail) if s)
+
+    # --- Current-job fields from work_history ---
+    jobs = [j for j in (profile.get("work_history") or []) if isinstance(j, dict) and j]
+    if not jobs:
+        return profile
+
+    def end_key(j):
+        p = _parse_month(j.get("end_date"))
+        return (9999, 12) if p is None else p  # open-ended -> most current
+
+    top = max(jobs, key=end_key)
+    if top.get("job_title"):
+        profile["current_job_title"] = top["job_title"]
+    if top.get("employer"):
+        profile["current_employer"] = top["employer"]
+    if top.get("start_date"):
+        profile["current_job_start_date"] = top["start_date"]
+
+    end_p = _parse_month(top.get("end_date"))
+    today = (date.today().year, date.today().month)
+    profile["currently_employed"] = (end_p is None) or (end_p >= today)
+
+    loc = (top.get("location") or "").strip()
+    if "," in loc:
+        city, state = (p.strip() for p in loc.split(",", 1))
+        if city:
+            profile["current_employer_city"] = city
+        if state:
+            profile["current_employer_state"] = state
+    elif loc:  # single token like "Remote"
+        profile["current_employer_city"] = loc
+        profile["current_employer_state"] = ""
+
+    # Rebuild employer_locations FRESH from work_history (drops stale entries),
+    # used by form_filler's resume-review card fixer.
+    locs = {j["employer"]: j["location"] for j in jobs
+            if j.get("employer") and j.get("location")}
+    if locs:
+        profile["employer_locations"] = locs
+    return profile
+
+
 def save_profile(profile: dict):
-    """Write the user profile to YAML."""
+    """Write the user profile to YAML (deriving flat fields from work_history first)."""
+    sync_derived_fields(profile)
     os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
     with open(PROFILE_PATH, "w") as f:
         yaml.dump(profile, f, default_flow_style=False, sort_keys=False)

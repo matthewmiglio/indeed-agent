@@ -15,6 +15,7 @@ from browser import launch_browser, human_delay, check_login_status
 from job_searcher import search_indeed, collect_job_listings, extract_job_details, navigate_to_job
 from job_scorer import score_job
 from form_filler import fill_and_submit_application
+from resume_tuner import build_tuned_resume
 from profile_manager import load_profile, check_completeness
 from storage import get_db, save_job, save_application, save_session, is_already_applied
 from distance import filter_jobs_by_commute, geocode
@@ -39,7 +40,7 @@ def timestamp():
     return time.strftime("%H:%M:%S")
 
 
-async def run_agent(user_prompt: str, resume_path: str = None, model: str = "mistral", dry_run: bool = False):
+async def run_agent(user_prompt: str, resume_path: str = None, model: str = "claude-haiku-4-5", dry_run: bool = False, tune: bool = True):
     """Run the full agent pipeline for a single user request.
 
     Steps:
@@ -54,7 +55,7 @@ async def run_agent(user_prompt: str, resume_path: str = None, model: str = "mis
     Args:
         user_prompt: The raw request string from the user.
         resume_path: Optional path to resume PDF (overrides profile default).
-        model: Ollama model name used by all LLM modules.
+        model: Claude model ID used by all LLM modules.
     """
     run_start = time.time()
     field_inventory.init_run(mode="dry-run" if dry_run else "live")
@@ -84,12 +85,12 @@ async def run_agent(user_prompt: str, resume_path: str = None, model: str = "mis
         log(f"WARNING: Profile incomplete ({filled}/{total}). Missing: {', '.join(missing)}")
         log("Some form fields may not be fillable. Consider running 'python src/main.py profile'.")
 
-    # Resolve resume path: CLI arg > intent > profile > None
-    resume = resume_path or intent.get("resume_path") or profile.get("resume_path")
+    # Resume: we tune a fresh PDF per job (no default/static resume). An explicit
+    # --resume / prompt path is only an optional fallback if tuning is off/fails.
+    resume = resume_path or intent.get("resume_path")
     if resume and os.path.exists(resume):
-        log(f"Resume: {resume}")
+        log(f"Fallback resume (used only if tuning is off/fails): {resume}")
     else:
-        log("WARNING: No resume file found. Applications may fail on resume upload.")
         resume = None
 
     # Step 3: Launch browser and search
@@ -230,8 +231,19 @@ async def run_agent(user_prompt: str, resume_path: str = None, model: str = "mis
                 log(f"Score: {score_result['score']}/100 — PASS, applying...")
                 field_inventory.record_job_start()
 
+                # Craft a resume tuned to this job; fall back to the static one on any failure.
+                job_resume = resume
+                if tune:
+                    log("Tuning resume for this job...")
+                    tuned = build_tuned_resume(job, profile)
+                    if tuned:
+                        job_resume = tuned
+                        log(f"Using tuned resume: {tuned}")
+                    else:
+                        log("Resume tuning unavailable — using static resume")
+
                 status, answers = await fill_and_submit_application(
-                    page, profile, job, resume, model=model
+                    page, profile, job, job_resume, model=model
                 )
                 if status == "applied":
                     field_inventory.record_job_completed()
@@ -248,7 +260,7 @@ async def run_agent(user_prompt: str, resume_path: str = None, model: str = "mis
                 job_id = save_job(db, job)
 
                 if status == "applied":
-                    save_application(db, job_id, resume or "", answers)
+                    save_application(db, job_id, job_resume or "", answers)
                     log(f"Successfully applied!")
                 elif status == "already_applied":
                     already_applied_count += 1
