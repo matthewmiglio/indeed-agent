@@ -68,3 +68,9 @@ desktop.ini
 build/
 dist/
 *.egg
+
+# Skills questionnaire dry-run artifact
+test-questionarre/
+
+# Base resume corpus — contains personal contact info (PII)
+resume_gen/base_resume.json
