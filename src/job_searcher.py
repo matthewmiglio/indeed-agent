@@ -4,9 +4,22 @@ Handles searching Indeed with filters, paginating through results, collecting
 job card data, and extracting full job details from individual posting pages.
 """
 
+import os
+import datetime
 import urllib.parse
 from playwright.async_api import Page
 from browser import human_delay, INDEED_URL, dump_page
+
+
+def _log_cloudflare(url: str, title: str):
+    """Append one line per Cloudflare hit; count with `wc -l logs/cloudflare.log`."""
+    try:
+        log = os.path.join(os.path.dirname(__file__), "..", "logs", "cloudflare.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.datetime.now().isoformat()}\t{url}\t{title}\n")
+    except Exception:
+        pass
 
 
 async def search_indeed(page: Page, query: str, location: str = None,
@@ -61,6 +74,7 @@ async def search_indeed(page: Page, query: str, location: str = None,
         title = await page.title()
         if "just a moment" in title.lower() or "verifying" in title.lower():
             print(f"  [search] WARNING: Cloudflare challenge detected (title={title!r}).")
+            _log_cloudflare(page.url, title)
             print(f"  [search] Pause and pass the verification in the browser, "
                   f"or wait 15-30 min for the rate-limit to relax.")
             # Give the user up to 3 minutes to click the challenge manually
@@ -377,6 +391,7 @@ async def wait_out_cloudflare(page: Page, timeout_ms: int = 180_000):
         if "just a moment" in t or "verifying" in t or "additional verification" in t:
             print(f"  [browser] Cloudflare challenge detected (title={title!r}). "
                   f"Click 'Verify you are human' in the browser; waiting up to 3 min...")
+            _log_cloudflare(page.url, title)
             await page.wait_for_function(
                 "document.title && !document.title.toLowerCase().includes('just a moment') "
                 "&& !document.title.toLowerCase().includes('verifying') "
