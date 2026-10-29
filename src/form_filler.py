@@ -1029,6 +1029,12 @@ async def fill_field(page: Page, field: FormField, value: str):
         elif field.field_type == "textarea":
             el = await page.query_selector(field.selector)
             if el:
+                # Final safety net: never exceed a known char limit. An over-limit
+                # value flags the field aria-invalid and the form won't advance
+                # (Indeed rich-text questions, e.g. Saildrone's 1500c prompts).
+                if field.max_length and len(str(value)) > field.max_length:
+                    value = str(value)[:field.max_length].rstrip()
+                    print(f"    [fill] truncated textarea to {field.max_length}c limit")
                 await el.click()
                 await human_delay(0.2, 0.4)
                 await el.fill("")
@@ -1805,6 +1811,21 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
             if field.field_type == "file":
                 await upload_resume(page, field, resume_path)
                 all_answers["resume"] = resume_path
+                continue
+
+            # Leave OPTIONAL rich-text questions blank. Indeed's rich-text editor
+            # (contenteditable, id "rich-text-question-input-*") flags itself
+            # aria-invalid once we type into it and then silently refuses to let
+            # Continue advance — even though the field is optional (observed on
+            # Saildrone, which loops the form forever). An untouched optional
+            # field is valid, so skipping it unblocks the form. Required rich-text
+            # still gets filled below.
+            # ponytail: skip the ones that break; keep plain textareas and any
+            # required field.
+            if (field.field_type == "textarea" and not field.required
+                    and "rich-text-question-input" in (field.selector or "")):
+                print(f"    [skip] optional rich-text left blank: {field.label_text[:40]}")
+                field_inventory.record_handler(field, "skipped-optional")
                 continue
 
             # Pre-filled fields (Indeed remembers prior answers via "Save my

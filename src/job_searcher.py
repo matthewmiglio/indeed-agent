@@ -362,8 +362,36 @@ async def extract_job_details(page: Page) -> dict:
     return data
 
 
+async def wait_out_cloudflare(page: Page, timeout_ms: int = 180_000):
+    """If a Cloudflare 'verify you are human' interstitial is showing, block
+    until it clears (manual checkbox click) so callers don't evaluate against a
+    page that's about to navigate out from under them.
+
+    ponytail: same check as search_indeed, shared so the apply path stops
+    crashing on the challenge; upgrade to an auto-solver only if manual clicks
+    get old.
+    """
+    try:
+        title = await page.title()
+        t = title.lower()
+        if "just a moment" in t or "verifying" in t or "additional verification" in t:
+            print(f"  [browser] Cloudflare challenge detected (title={title!r}). "
+                  f"Click 'Verify you are human' in the browser; waiting up to 3 min...")
+            await page.wait_for_function(
+                "document.title && !document.title.toLowerCase().includes('just a moment') "
+                "&& !document.title.toLowerCase().includes('verifying') "
+                "&& !document.title.toLowerCase().includes('additional verification')",
+                timeout=timeout_ms,
+            )
+            print(f"  [browser] Challenge cleared - continuing.")
+            await human_delay(1, 2)
+    except Exception as e:
+        print(f"  [browser] Cloudflare check error: {e}")
+
+
 async def navigate_to_job(page: Page, job_url: str):
     """Navigate to a specific job posting page."""
     print(f"  [browser] Navigating to: {job_url[:100]}")
     await page.goto(job_url, wait_until="domcontentloaded")
     await human_delay(1, 2)
+    await wait_out_cloudflare(page)

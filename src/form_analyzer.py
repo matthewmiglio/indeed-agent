@@ -119,6 +119,17 @@ async def analyze_form_page(page: Page) -> list[FormField]:
                     if (m) { maxLen = parseInt(m[2], 10); break; }
                 }
             }
+            // Rich-text questions (contenteditable, e.g. Saildrone) expose no
+            // maxLength attr and render NO visible counter — the char limit
+            // lives only in the page's embedded question JSON. Look it up by the
+            // field's name so the LLM respects it (otherwise a 1800-char answer
+            // overflows the 1500 limit, flags aria-invalid, and the form will
+            // never advance).
+            if (!maxLen && el.name) {
+                const mm = document.documentElement.innerHTML.match(
+                    new RegExp('"name":"' + el.name + '"[\\s\\S]{0,600}?"limit":(\\d+)'));
+                if (mm) maxLen = parseInt(mm[1], 10);
+            }
             fields.push({
                 id: el.id || '',
                 name: el.name || '',

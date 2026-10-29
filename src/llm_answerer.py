@@ -28,7 +28,9 @@ Truthfulness (do not violate):
 - Asked about a skill/technology you don't have: "No" for yes/no; for free-form, note related experience in one sentence without claiming mastery.
 - If the profile gives you nothing to answer from, reply with exactly "SKIP".
 
-Respect any character limit stated in the question; stay under it.
+Respect any character limit stated in the question; stay well under it. Finish your last sentence before the limit rather than running up against it.
+
+NEVER use em dashes or en dashes (the "—" or "–" characters). Use a period, comma, parentheses, colon, or semicolon instead. This is a hard rule for every answer.
 
 Return ONLY valid JSON:
 {
@@ -81,8 +83,8 @@ def answer_question(question: str, field_type: str, options: list[str],
 
     length_text = ""
     if max_length and max_length > 0:
-        # Aim for ~80% of the limit to leave headroom for variation; never go over.
-        target = int(max_length * 0.8)
+        # Aim for ~70% of the limit to leave headroom for variation; never go over.
+        target = int(max_length * 0.7)
         length_text = (
             f"\n\nIMPORTANT: This field has a HARD character limit of {max_length} characters. "
             f"Your answer MUST be {target} characters or fewer. "
@@ -131,6 +133,19 @@ Provide an appropriate answer for this form field."""
     elif raw_answer is None:
         raw_answer = ""
     answer = str(raw_answer).strip()
+
+    # Drafts sent to employers: never em/en dashes (user rule). The model obeys
+    # the prompt only intermittently, so strip deterministically.
+    answer = answer.replace(" — ", ", ").replace("—", ", ")
+    answer = answer.replace(" – ", ", ").replace("–", "-").replace(" ,", ",")
+
+    # Hard-respect the char limit, but cut at a sentence boundary so a trimmed
+    # answer still reads cleanly instead of stopping mid-word.
+    if max_length and len(answer) > max_length:
+        cut = answer[:max_length]
+        end = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("! "), cut.rfind("? "))
+        answer = cut[:end + 1] if end > max_length * 0.5 else cut.rstrip()
+
     confidence = result.get("confidence", "low")
     reasoning = result.get("reasoning", "")
 
