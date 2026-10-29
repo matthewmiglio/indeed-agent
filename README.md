@@ -115,7 +115,7 @@ poetry run python src/main.py "apply to 10 graphic design jobs in Farmington, MI
 | `src/field_inventory.py` | Per-run dedup + summary of every field seen. |
 | `src/prompt_parser.py` | Claude parse of the natural-language request into a search intent. |
 | `src/job_scorer.py` | Claude match score (0-100) + pass/fail gate per listing. |
-| `src/claude_client.py` | Anthropic API shim: system + prompt → JSON, used by the three LLM modules. |
+| `src/claude_client.py` | Claude driver: system + prompt → JSON, used by the three LLM modules. Uses the `claude` CLI (Claude Code subscription, no key) by default, or the Anthropic SDK when `ANTHROPIC_API_KEY` is set. |
 
 ## Safety
 
@@ -125,4 +125,8 @@ The default mode submits real applications; this app is built to work. Use `--dr
 
 - Python 3.11+ via Poetry
 - Playwright (auto-installed via Poetry)
-- `ANTHROPIC_API_KEY` set in the environment (Claude API access)
+- Claude access, one of:
+  - the `claude` CLI logged in with a Claude Code subscription (default; no API key needed), or
+  - `ANTHROPIC_API_KEY` set in the environment (uses the Anthropic SDK instead)
+
+All LLM work (prompt parsing, job scoring, question answering, resume tuning, skills generation) runs on Claude. There are no local models.
