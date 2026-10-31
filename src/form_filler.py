@@ -48,11 +48,11 @@ FIELD_MAP = [
     ("own business", "_no"),
     ("consent to receive", "_yes"),
     ("informational recruiting", "_yes"),
-    # Commute — always Yes. Saying No is an instant auto-decline on most
-    # applications, and the candidate is willing to drive ~30-35min anyway.
-    ("commute", "_yes"),
-    ("able to commute", "_yes"),
-    ("reliably commute", "_yes"),
+    # Commute — truthful, NOT always-Yes. We can only commute to a local
+    # (home-state/metro) or remote job; claiming a daily commute to a far
+    # city is a lie (see the _commute token). Relocation is a separate
+    # question, answered Yes via the relocation patterns below.
+    ("commute", "_commute"),
     ("travel to", "_yes"),
     ("text messages from", "_yes"),
     ("sms terms", "_yes"),
@@ -241,11 +241,10 @@ FIELD_MAP = [
     ("earliest start", "start_date"),
     ("when are you available", "start_date"),
 
-    # Relocation & commute — always Yes. Saying No to either is an instant
-    # auto-decline on most applications, regardless of the profile flag.
+    # Relocation — Yes, grounded in profile willing_to_relocate=True.
+    # (Commute is handled truthfully by _commute above.)
     ("relocat", "_yes"),
     ("willing to move", "_yes"),
-    ("commute", "_yes"),
 
     # Common screening
     ("driver", "has_drivers_license"),
@@ -737,6 +736,28 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
             if profile_key == "_no":
                 if field.field_type in ("text", "tel", "email", "number", "url"):
                     return None
+                return "No"
+            if profile_key == "_commute":
+                # Truthful commute answer: Yes only for a remote job or one in
+                # our home state/metro; otherwise No (can't daily-commute across
+                # the country, even though willing_to_relocate). ponytail: state
+                # abbrev word-boundary + home city; Indeed locations are "City, ST ZIP".
+                if field.field_type in ("text", "tel", "email", "number", "url"):
+                    return None
+                import re
+                home_state = (profile.get("state") or "").strip().lower()
+                home_city = (profile.get("city") or "").strip().lower()
+                blob = " ".join([
+                    field.label_text or "",
+                    str((job_data or {}).get("location") or ""),
+                    str((job_data or {}).get("title") or ""),
+                ]).lower()
+                if "remote" in blob:
+                    return "Yes"
+                if home_city and home_city in blob:
+                    return "Yes"
+                if home_state and re.search(r"\b" + re.escape(home_state) + r"\b", blob):
+                    return "Yes"
                 return "No"
             if profile_key == "_us":
                 return "United States"
@@ -1703,6 +1724,7 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
     resume_done = False  # upload our tuned PDF exactly once
     stuck_url = None
     stuck_n = 0
+    total_fields_seen = 0  # giant-ATS-form detector (see below)
     for step in range(max_steps):
         print(f"\n  [form] === Step {step + 1}/{max_steps} ===")
 
@@ -1737,6 +1759,22 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                           "Job requires a resume + wrong one would be sent -> not applying.")
                     return "skipped_resume_required", all_answers
                 print("  [resume] No resume in this application (none required) -> ok to submit.")
+
+            # Pre-submit answer sanity check (deterministic Layer A + one Claude
+            # review in Layer B). In DRY_RUN we only print; live, any issue blocks.
+            from answer_sanity import sanity_check
+            ok, issues = sanity_check(all_answers, user_profile, job_data, model=model)
+            if issues:
+                all_answers["_sanity_issues"] = issues
+                print(f"  [sanity] {len(issues)} issue(s) flagged before submit:")
+                for it in issues:
+                    print(f"    [sanity] - {it}")
+                if not DRY_RUN:
+                    print("  [sanity] BLOCKING live submit due to flagged answers.")
+                    return "blocked_sanity", all_answers
+            else:
+                print("  [sanity] all answers passed pre-submit checks.")
+
             print("  [form] Review page detected, submitting...")
             if await click_submit(page):
                 await human_delay(2, 4)
@@ -1803,6 +1841,17 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
         # Analyze the current form page
         fields = await analyze_form_page(page)
         field_inventory.record_page(fields, job_url=page.url, step=step + 1)
+
+        # Giant ATS-form detect-and-skip. Some employers embed a full multi-page
+        # applicant-tracking form (dozens of checkboxes, EEO matrices, several
+        # essays) inside Indeed. These blow past the step budget and aren't worth
+        # the dozens of LLM calls; bail cleanly rather than grinding to the cap.
+        # ponytail: field-count heuristic; loosen thresholds if a normal form trips.
+        total_fields_seen += len(fields)
+        if len(fields) >= 40 or total_fields_seen > 90:
+            print(f"  [form] Giant ATS form detected (this page={len(fields)} "
+                  f"fields, cumulative={total_fields_seen}) — skipping")
+            return "skipped-giant-form", all_answers
 
         if not fields:
             cur_url = page.url.lower()

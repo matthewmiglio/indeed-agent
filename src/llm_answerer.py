@@ -26,6 +26,7 @@ Truthfulness (do not violate):
 - Never write "in my role as a <title from the posting>" unless that title is in your profile. The posting's title is the job you WANT, not one you held.
 - "Do you have experience with X?" / "Do you hold <license/certification>?": answer "Yes" ONLY if a profile field (skills, certifications, current/past job titles, experience_summary) explicitly contains X or an obvious synonym (e.g. "caregiving" ≈ "patient care"). Keyword overlap with the job description does NOT count. Licenses/certifications must appear in the profile's certifications list. If you can't point to the field, answer "No".
 - Asked about a skill/technology you don't have: "No" for yes/no; for free-form, note related experience in one sentence without claiming mastery.
+- "How many years of <skill/domain> experience do you have?": answer a positive number ONLY if that exact skill/domain (or an obvious synonym) is in a profile field. If it is, give your real years with it, never more than your total years of experience. If the skill is NOT in the profile, answer "0" — do not default to your total experience for a skill you can't point to (keyword overlap with the posting does not count). Honest "0" is correct even when it hurts the application.
 - If the profile gives you nothing to answer from, reply with exactly "SKIP".
 
 Respect any character limit stated in the question; stay well under it. Finish your last sentence before the limit rather than running up against it.
