@@ -215,6 +215,45 @@ async def analyze_form_page(page: Page) -> list[FormField]:
             });
         }
 
+        // Yes/No checkbox groups: some ATS forms (e.g. Siteimprove) render a
+        // single-select Yes/No question as <fieldset><legend>Question</legend>
+        // with TWO checkboxes sharing one name, each labeled only "Yes"/"No".
+        // Without this the analyzer emits two fields labeled "Yes"/"No" with no
+        // question text, so nothing can answer them and the form never advances.
+        // Group them by name and emit as a radio driven by the legend.
+        // Narrow on purpose: exactly two Yes/No options + a legend, so genuine
+        // "check all that apply" multi-selects are left untouched.
+        const cbGroups = {};
+        document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            if (!cb.offsetParent || !cb.name) return;
+            const g = cbGroups[cb.name] || (cbGroups[cb.name] = {options: [], required: cb.required, checked: '', label: ''});
+            const optionLabel = getLabel(cb) || cb.value;
+            g.options.push(optionLabel);
+            if (cb.checked) g.checked = optionLabel;
+            if (!g.label) {
+                const fs = cb.closest('fieldset');
+                const lg = fs && fs.querySelector('legend');
+                if (lg) g.label = lg.textContent.trim();
+            }
+        });
+        const groupedCb = new Set();
+        for (const [name, g] of Object.entries(cbGroups)) {
+            if (g.options.length !== 2 || !g.label) continue;
+            if (!g.options.every(o => /^(yes|no)$/i.test((o || '').trim()))) continue;
+            groupedCb.add(name);
+            if (seen.has('radio_' + name)) continue;
+            seen.add('radio_' + name);
+            fields.push({
+                id: '', name: name, type: 'radio', label: g.label,
+                required: g.required, value: g.checked, options: g.options,
+                placeholder: '', selector: 'input[type="checkbox"][name="' + name + '"]', max_length: 0
+            });
+        }
+        // Drop the individual checkbox entries we just regrouped.
+        for (let i = fields.length - 1; i >= 0; i--) {
+            if (fields[i].type === 'checkbox' && groupedCb.has(fields[i].name)) fields.splice(i, 1);
+        }
+
         // Custom RN-Web dropdowns (Indeed apply-questions render SELECT questions as
         // <div role="combobox"> with no native <select>, so the scan above misses them).
         // Options only exist once opened, so we emit the control; the filler opens it.

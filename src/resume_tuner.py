@@ -57,6 +57,11 @@ SKILLS DENYLIST (strict): if a "SKILLS DENYLIST" block appears in the corpus, ne
 
 Tailoring goal: surface the corpus experience most relevant to THIS job. Rewrite the title line and summary to match the role, reorder and trim bullets to lead with what the posting asks for, and order the skills section by relevance to the posting. Wrap posting-relevant keywords that are genuinely backed by the corpus in **double asterisks** for bold.
 
+SKILLS SECTION GROUNDING (strict). Two kinds of skill entries, judged differently:
+1. Any NAMED technology, tool, language, framework, platform, library, database, architecture pattern/style, domain standard, certification, or methodology (e.g. Microservices, Kubernetes, Elasticsearch, GraphQL, Kafka, Accessibility/WCAG, Scrum/Agile, Terraform) — list it ONLY if that exact name (or an obvious alias) appears in the corpus. The posting asking for it is NEVER a reason to add it. If the candidate lacks it, omit it; listing it is a fabrication.
+2. Generic engineering practices any professional software engineer legitimately claims (System design, Code review, Mentoring, Unit/Integration/End-to-end testing, Debugging) are allowed even if not spelled out in the corpus.
+When unsure which kind an entry is, treat it as kind 1 and drop it. Never pad the skills list with posting keywords to look like a match.
+
 WORK EXPERIENCE ORDER: list work-experience entries in reverse-chronological order (most recent / current role first, by end date — "Present" is newest). Reorder BULLETS within a role and the SKILLS section for relevance, but NEVER reorder the roles themselves out of date order; leading with an older role looks like a mistake.
 
 Do NOT wrap the summary (or any field) in single asterisks for italic — the renderer italicizes the summary by style. Use asterisks ONLY as **double** for bold.
