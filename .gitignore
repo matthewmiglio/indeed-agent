@@ -75,3 +75,6 @@ test-questionarre/
 # Base resume corpus — contains personal contact info (PII)
 resume_gen/base_resume.json
 logs/
+
+# Local job-search criteria (personal, not tracked)
+search_critiera/
