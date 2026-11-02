@@ -111,6 +111,12 @@ FIELD_MAP = [
     ("zip/postal", "zip_code"),
     ("linkedin", "linkedin_url"),
     ("linked in", "linkedin_url"),   # spaced variant; otherwise the LLM guesses the handle
+    # GitHub before website so a combined "Website/GitHub" field gets the code link.
+    ("github", "github_url"),
+    ("portfolio", "website_url"),
+    ("personal website", "website_url"),
+    ("personal site", "website_url"),
+    ("website", "website_url"),
     ("how did you hear", "_how_heard"),   # truthful: we found the job on Indeed
 
     # Address — line-2 / apt / suite are deliberately left blank; line 1 gets
