@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +26,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(__file__))
 from claude_client import chat_json          # noqa: E402
-from profile_manager import load_profile, save_profile  # noqa: E402
+from profile_manager import load_profile, save_profile, PROFILE_PATH  # noqa: E402
 
 PORT = 8765
 GEN_MODEL = "claude-opus-4-8"
@@ -294,8 +295,7 @@ def _make_handler(apply: bool, proposed_path: str, shutdown_on_save: bool):
 
                     if apply:
                         save_profile(proposed)
-                        path = os.path.abspath(
-                            os.path.join(os.path.dirname(__file__), "..", "data", "user_profile.yaml"))
+                        path = os.path.abspath(PROFILE_PATH)
                     else:
                         with open(proposed_path, "w", encoding="utf-8") as f:
                             yaml.dump(proposed, f, sort_keys=False, allow_unicode=True)
@@ -310,7 +310,7 @@ def _make_handler(apply: bool, proposed_path: str, shutdown_on_save: bool):
                     print(f"  non_skills:   {len(proposed['non_skills'])}")
                     print(f"  wrote -> {path}")
                     if not apply:
-                        print("  data/user_profile.yaml NOT modified")
+                        print("  user_data/user_profile.yaml NOT modified")
                     print("=" * 60)
 
                     self._send(200, json.dumps({
@@ -347,8 +347,7 @@ def serve(apply: bool = False, port: int = PORT, proposed_path: str = None,
         `apply` (setup flow dies on Save; the dry-run harness stays up to iterate).
     """
     if proposed_path is None:
-        proposed_path = os.path.join(os.path.dirname(__file__), "..",
-                                     "test-questionarre", "proposed_changes.yaml")
+        proposed_path = os.path.join(tempfile.gettempdir(), "skills_proposed_changes.yaml")
     if shutdown_on_save is None:
         shutdown_on_save = apply
     mode = "SAVES TO PROFILE" if apply else "DRY RUN (no profile writes)"

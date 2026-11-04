@@ -27,7 +27,7 @@ async def main(title, location, n):
         for job in listings:
             url = job.get("job_url") or ""
             if url:
-                print(f"JOB\t{url}\t{job.get('title', '?')}\t{job.get('company', '?')}")
+                print(f"JOB\t{url}\t{job.get('title', '?')}\t{job.get('company', '?')}\t{job.get('salary', '') or '-'}")
                 printed += 1
         if not printed:
             print("NONE")

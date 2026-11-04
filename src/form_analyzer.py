@@ -115,7 +115,12 @@ async def analyze_form_page(page: Page) -> list[FormField]:
                     // Indeed's counter renders as either "0 / 500" (empty
                     // state) or "544 / 500 characters" (overflow state).
                     // Match both shapes; the limit is always the SECOND number.
-                    const m = txt.match(/(\d+)\s*\/\s*(\d+)(?:\s*characters?)?(?:\s|<)/i);
+                    // No trailing delimiter: textContent strips tags (so '<'
+                    // never appears) and the counter "0 / 500" is often the LAST
+                    // text in the wrapper (no trailing space), so requiring one
+                    // made the match fail and left max_length=0 (814-char answer
+                    // overflowed a 500 limit -> aria-invalid -> Continue disabled).
+                    const m = txt.match(/(\d+)\s*\/\s*(\d+)(?:\s*characters?)?/i);
                     if (m) { maxLen = parseInt(m[2], 10); break; }
                 }
             }

@@ -40,12 +40,32 @@ async def launch_browser(headless=False) -> tuple:
     _CONSOLE.clear()
     _NETFAIL.clear()
     pw = await async_playwright().start()
-    context = await pw.chromium.launch_persistent_context(
-        PROFILE_DIR,
+    # Launch config hardened per the 20-agent research in
+    # docs/browser_action_bot_score_improvemnts/. Key points proven there:
+    #   - real Chrome (channel="chrome") is what reCAPTCHA scores; Chromium drifts.
+    #   - DROP --enable-automation: it is what renders the "controlled by automated
+    #     test software" banner and flips the AutomationControlled flag reCAPTCHA reads.
+    #   - no_viewport=True: an emulated viewport makes screen vs outerWidth geometry
+    #     impossible for a real monitor (a bot tell). Use the real OS window instead.
+    #   - NO JS stealth init script: spoofing navigator.webdriver/plugins/WebGL from JS
+    #     is net-NEGATIVE — it adds non-native getters that fail toString()/descriptor
+    #     checks, a __pwInitScripts global, and a macOS WebGL string on a Windows box
+    #     (cross-layer mismatch). Real Chrome's native values are already coherent.
+    launch_kwargs = dict(
         headless=headless,
-        viewport={"width": 1280, "height": 900},
+        no_viewport=True,
+        ignore_default_args=["--enable-automation"],
         args=["--disable-blink-features=AutomationControlled"],
     )
+    try:
+        context = await pw.chromium.launch_persistent_context(
+            PROFILE_DIR, channel="chrome", **launch_kwargs)
+    except Exception as e:
+        # Real Chrome is what scores well; the Chromium fallback has a drifted
+        # fingerprint. Make the degrade LOUD rather than silently tanking the score.
+        print(f"[browser] WARNING: real Chrome unavailable ({e}); "
+              f"FALLING BACK TO CHROMIUM — expect a worse bot score")
+        context = await pw.chromium.launch_persistent_context(PROFILE_DIR, **launch_kwargs)
     # Attach to the initial page and any page opened later (e.g. smartapply popups).
     context.on("page", _attach_diagnostics)
     page = context.pages[0] if context.pages else await context.new_page()

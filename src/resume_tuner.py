@@ -28,13 +28,14 @@ from job_scorer import _build_profile_summary  # reuse the profile condenser
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 RESUME_GEN_DIR = _REPO_ROOT / "resume_gen"
-BASE_RESUME_PATH = RESUME_GEN_DIR / "base_resume.json"
 DATA_RESUMES_DIR = _REPO_ROOT / "data" / "resumes"
 
-# The candidate's deep history (personal, not vendored). Env-overridable.
-RESUME_CONTENT_DIR = Path(
-    os.environ.get("RESUME_CONTENT_DIR", str(Path.home() / "Downloads" / "resume-work"))
-)
+# Personal data is per-profile under user_data/profiles/<active>/. Resolved at import
+# from the active profile; the apply bot fixes its profile at startup.
+# ponytail: import-time snapshot; switching the active profile mid-process needs a reload.
+import profile_manager  # noqa: E402
+BASE_RESUME_PATH = Path(profile_manager.base_resume_path())
+RESUME_CONTENT_DIR = Path(os.environ.get("RESUME_CONTENT_DIR", profile_manager.profile_dir()))
 
 GEN_MODEL = "claude-opus-4-8"
 VISION_MODEL = "claude-haiku-4-5"
@@ -116,7 +117,7 @@ def _fixed_contact(base: dict) -> list:
 def _load_corpus(profile: dict) -> str:
     """Concatenate the base resume, docs/*.md, and a profile summary as ground truth."""
     parts = ["=== BASE RESUME (JSON) ===", BASE_RESUME_PATH.read_text(encoding="utf-8")]
-    docs_dir = RESUME_CONTENT_DIR / "docs"
+    docs_dir = RESUME_CONTENT_DIR / "history"
     if docs_dir.is_dir():
         budget = 12000
         for md in sorted(docs_dir.glob("*.md")):

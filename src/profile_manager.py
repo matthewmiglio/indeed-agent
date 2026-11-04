@@ -10,7 +10,70 @@ import re
 import yaml
 from datetime import date
 
-PROFILE_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "user_profile.yaml")
+# All personal data lives under one gitignored root: user_data/
+# Multi-profile: user_data/profiles/<name>/{profile.yaml, base_resume.json, history/*.md}
+# The active profile is named in user_data/active_profile (defaults to "default").
+USER_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "user_data")
+PROFILES_DIR = os.path.join(USER_DATA_DIR, "profiles")
+ACTIVE_FILE = os.path.join(USER_DATA_DIR, "active_profile")
+
+
+def active_profile() -> str:
+    """Name of the active profile (user_data/active_profile), 'default' if unset."""
+    try:
+        name = open(ACTIVE_FILE, encoding="utf-8").read().strip()
+        return name or "default"
+    except OSError:
+        return "default"
+
+
+def set_active_profile(name: str):
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+    with open(ACTIVE_FILE, "w", encoding="utf-8") as f:
+        f.write(name.strip())
+
+
+def list_profiles() -> list:
+    """Profile names that exist on disk (dirs under user_data/profiles/)."""
+    if not os.path.isdir(PROFILES_DIR):
+        return []
+    return sorted(d for d in os.listdir(PROFILES_DIR)
+                  if os.path.isdir(os.path.join(PROFILES_DIR, d)))
+
+
+def profile_dir(name: str = None) -> str:
+    return os.path.join(PROFILES_DIR, name or active_profile())
+
+
+def rename_profile(old: str, new: str):
+    """Rename a profile dir; keep the active pointer in sync. Raises ValueError on conflict."""
+    old, new = old.strip(), new.strip()
+    if not new:
+        raise ValueError("New name is empty.")
+    src, dst = profile_dir(old), profile_dir(new)
+    if not os.path.isdir(src):
+        raise ValueError(f"Profile '{old}' does not exist.")
+    if new != old and os.path.exists(dst):
+        raise ValueError(f"Profile '{new}' already exists.")
+    os.rename(src, dst)
+    if active_profile() == old:
+        set_active_profile(new)
+
+
+def profile_path(name: str = None) -> str:
+    return os.path.join(profile_dir(name), "profile.yaml")
+
+
+def base_resume_path(name: str = None) -> str:
+    return os.path.join(profile_dir(name), "base_resume.json")
+
+
+def history_dir(name: str = None) -> str:
+    return os.path.join(profile_dir(name), "history")
+
+
+# Back-compat alias for the active profile's yaml (display/import convenience).
+PROFILE_PATH = profile_path()
 
 # Each datum: key -> {prompt, type, required, category}
 DATUMS = {
@@ -47,7 +110,8 @@ DATUMS = {
     "graduation_year":    {"prompt": "Graduation year", "type": "str", "required": False, "category": "Education"},
     "skills":             {"prompt": "Key skills (comma-separated, e.g. Python, AWS, SQL)", "type": "list", "required": False, "category": "Skills"},
     "certifications":     {"prompt": "Certifications (comma-separated, or 'none')", "type": "list", "required": False, "category": "Skills"},
-    "desired_salary":     {"prompt": "Desired salary (e.g. 80000 or 80000-100000)", "type": "str", "required": False, "category": "Preferences"},
+    # desired_salary is NOT a user-profile datum: pay is per-search, so it lives on
+    # the search profile (salary_min) and is overlaid by search_profiles.effective_profile.
     "start_date":         {"prompt": "When can you start? (e.g. Immediately, 2 weeks, a date)", "type": "str", "required": False, "category": "Preferences"},
     "willing_to_relocate": {"prompt": "Willing to relocate? (yes/no)", "type": "bool", "required": False, "category": "Preferences"},
     "work_type_preference": {"prompt": "Work type preference (remote / hybrid / onsite / any)", "type": "str", "required": False, "category": "Preferences"},
@@ -109,11 +173,12 @@ def _parse_value(raw: str, dtype: str):
         return raw
 
 
-def load_profile() -> dict:
-    """Load the user profile from YAML. Returns empty dict if file doesn't exist."""
-    if not os.path.exists(PROFILE_PATH):
+def load_profile(name: str = None) -> dict:
+    """Load a profile from YAML (active profile if name is None). Empty dict if absent."""
+    path = profile_path(name)
+    if not os.path.exists(path):
         return {}
-    with open(PROFILE_PATH, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     return data
 
@@ -201,11 +266,12 @@ def sync_derived_fields(profile: dict) -> dict:
     return profile
 
 
-def save_profile(profile: dict):
-    """Write the user profile to YAML (deriving flat fields from work_history first)."""
+def save_profile(profile: dict, name: str = None):
+    """Write a profile to YAML (active profile if name is None), deriving flat fields first."""
     sync_derived_fields(profile)
-    os.makedirs(os.path.dirname(PROFILE_PATH), exist_ok=True)
-    with open(PROFILE_PATH, "w") as f:
+    path = profile_path(name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         yaml.dump(profile, f, default_flow_style=False, sort_keys=False)
 
 

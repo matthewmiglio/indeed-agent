@@ -185,7 +185,7 @@ document.querySelector("#save").onclick = async () => {
   const r = await fetch("/save", {method:"POST", body: JSON.stringify({answers, work_history})});
   const j = await r.json();
   const out = document.querySelector("#out"); out.style.display = "block";
-  out.textContent = `Saved ${j.set} field(s) and ${j.jobs} work-history job(s) to data/user_profile.yaml.\\n`
+  out.textContent = `Saved ${j.set} field(s) and ${j.jobs} work-history job(s) to user_data/user_profile.yaml.\\n`
     + `Required complete: ${j.filled}/${j.total}.`
     + (j.missing.length ? `\\nStill missing: ${j.missing.join(", ")}` : " All required fields filled.");
   document.querySelector("#status").textContent = j.server_stopping

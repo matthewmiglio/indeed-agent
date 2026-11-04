@@ -337,6 +337,14 @@ async def extract_job_details(page: Page) -> dict:
             'span.salary-snippet'
         );
         if (salaryEl) result.salary = salaryEl.textContent.trim();
+        // Fallback: Indeed often renders pay only as a "$X - $Y a year" string in
+        // the page body, not in #salaryInfoAndJobType. Scan body text for the first
+        // such pay string (the job's own pay sits near the top; similar-jobs come later).
+        if (!result.salary) {
+            const bodyText = (document.body && document.body.innerText) || '';
+            const m = bodyText.match(/\$\s?[\d,]+(?:\.\d+)?\s?[kK]?(?:\s?(?:-|–|—|to)\s?\$?\s?[\d,]+(?:\.\d+)?\s?[kK]?)?\s?(?:a year|per year|\/yr|annually|a month|per month|an hour|\/hr|hourly)/i);
+            if (m) result.salary = m[0].trim();
+        }
 
         // Location
         const locEl = document.querySelector(

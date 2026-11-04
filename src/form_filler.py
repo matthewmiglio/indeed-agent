@@ -6,12 +6,14 @@ uploading resume, and submitting the application.
 """
 
 import asyncio
+import os
 from playwright.async_api import Page
 from browser import human_delay, dump_page
 from form_analyzer import FormField, analyze_form_page, is_review_page, is_confirmation_page, detect_already_applied
 from llm_answerer import answer_question
 import field_inventory
 import qa_logger
+import humanize
 
 # Dry-run mode: walk the entire flow but never click the final Submit button.
 # Toggled by main.py via --dry-run.
@@ -247,7 +249,13 @@ FIELD_MAP = [
     ("earliest start", "start_date"),
     ("when are you available", "start_date"),
 
-    # Relocation — Yes, grounded in profile willing_to_relocate=True.
+    # Relocation NEED questions ("do you require relocation?", "relocation
+    # assistance", "not a local candidate...") -> remote-aware _relocation (No for
+    # a remote/home-local job). These MUST precede the generic "relocat" below.
+    ("require relocation", "_relocation"),
+    ("relocation assistance", "_relocation"),
+    ("local candidate", "_relocation"),
+    # Relocation WILLINGNESS — Yes, grounded in profile willing_to_relocate=True.
     # (Commute is handled truthfully by _commute above.)
     ("relocat", "_yes"),
     ("willing to move", "_yes"),
@@ -306,35 +314,39 @@ def _extract_salary_range(job_data: dict) -> tuple[float, float] | None:
 def _salary_answer(job_data: dict, profile: dict, is_hourly: bool = False) -> str | None:
     """Compute the salary answer.
 
-    Returns the bottom-20% of the job's posted range when present; otherwise
-    falls back to ``profile['desired_salary']`` (annual) or
-    ``profile['desired_hourly_rate']`` (hourly).
+    Answers the candidate's OWN target first: ``profile['desired_salary']`` (which
+    the apply flow overlays from the active search profile's salary floor). The
+    job's posted range is only a last-resort fallback when we have no desired
+    salary — we never lowball to the bottom of the employer's range.
 
     If ``is_hourly`` is True the result is normalized to a per-hour figure
-    (annual is divided by 2080). This keeps "what's your hourly rate?"
-    questions from being answered with an annual salary.
+    (annual is divided by 2080), so "what's your hourly rate?" isn't answered
+    with an annual salary.
     """
-    rng = _extract_salary_range(job_data) if job_data else None
-    if rng:
-        lo, hi = rng
-        target = lo + (hi - lo) * 0.20
-        if is_hourly and target > 200:
-            # The posted range is annual; convert to hourly.
-            target = target / 2080
-        return str(int(round(target)))
+    annual = profile.get("desired_salary")
 
     if is_hourly:
         hourly = profile.get("desired_hourly_rate")
         if hourly:
             return str(hourly)
-        annual = profile.get("desired_salary")
         if annual:
             try:
                 return str(int(round(float(annual) / 2080)))
             except (TypeError, ValueError):
                 return str(annual)
-        return None
-    return profile.get("desired_salary")
+    elif annual:
+        return str(annual)
+
+    # Fallback ONLY when we have no desired figure: anchor to the job's range
+    # (bottom-20%), converting to hourly if the field wants a rate.
+    rng = _extract_salary_range(job_data) if job_data else None
+    if rng:
+        lo, hi = rng
+        target = lo + (hi - lo) * 0.20
+        if is_hourly and target > 200:
+            target = target / 2080
+        return str(int(round(target)))
+    return None
 
 
 def _has_credential(profile: dict, keyword: str) -> bool:
@@ -618,6 +630,21 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
                 if "authorized to work" in ol and "not authorized" not in ol and "not legally" not in ol:
                     return o
 
+    # Citizenship / employment-eligibility dropdowns ("What's your citizenship /
+    # employment eligibility?"). The options mount only when the combobox is opened,
+    # so field.options is empty here — return a plain-language intent and let
+    # _fill_combobox match it against the live options (it has a citizenship-aware
+    # fallback for phrasings we can't see at map time). "sponsor"-labelled questions
+    # already returned above as Yes/No, so they never reach here.
+    if ("citizenship" in label or "employment eligibility" in label
+            or ("eligibility" in label and "work" in label)):
+        if profile.get("us_citizen"):
+            return "U.S. Citizen"
+        if profile.get("work_authorized_us") and not profile.get("sponsorship_needed"):
+            return "Authorized to work"
+        if profile.get("sponsorship_needed"):
+            return "Require sponsorship"
+
     # Veteran self-ID. Phrasing varies ("I am not a protected veteran" vs Infosys's
     # "No, I am not a veteran under one of the classifications"), so pick the actual
     # option that means "not a veteran" rather than returning a fixed string.
@@ -765,6 +792,30 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
                 if home_state and re.search(r"\b" + re.escape(home_state) + r"\b", blob):
                     return "Yes"
                 return "No"
+            if profile_key == "_relocation":
+                # "Do you REQUIRE relocation / relocation assistance?" (often phrased
+                # "if you are not a local candidate, do you require relocation?").
+                # Truthful + consistent with the job: a remote job (or one in our
+                # home city/state) needs no relocation -> "No". A distant on-site job
+                # -> "Yes" only if we're willing to relocate; else "No". This keeps
+                # the pre-submit sanity gate from flagging "relocation on a remote job".
+                if field.field_type in ("text", "tel", "email", "number", "url"):
+                    return None
+                import re
+                home_state = (profile.get("state") or "").strip().lower()
+                home_city = (profile.get("city") or "").strip().lower()
+                blob = " ".join([
+                    field.label_text or "",
+                    str((job_data or {}).get("location") or ""),
+                    str((job_data or {}).get("title") or ""),
+                ]).lower()
+                if "remote" in blob:
+                    return "No"
+                if home_city and home_city in blob:
+                    return "No"
+                if home_state and re.search(r"\b" + re.escape(home_state) + r"\b", blob):
+                    return "No"
+                return "Yes" if profile.get("willing_to_relocate") else "No"
             if profile_key == "_us":
                 return "United States"
             if profile_key == "_resume_pdf":
@@ -960,13 +1011,7 @@ async def click_apply_button(page: Page) -> bool:
                 return True
 
             # Otherwise click, escalating past overlays: normal -> force -> JS.
-            try:
-                await btn.click(timeout=4000)
-            except Exception:
-                try:
-                    await btn.click(force=True, timeout=4000)
-                except Exception:
-                    await page.evaluate("el => el.click()", btn)
+            await humanize.click(page, btn)
             await human_delay(2, 4)
             return True
         except Exception as e:
@@ -993,6 +1038,41 @@ def _yesno_option(value: str, texts: list[str]) -> str | None:
                 or "none" in tl or "do not" in tl or "don't" in tl
                 or tl.startswith("no ") or tl == "no"):
             return t
+    return None
+
+
+def _citizenship_option(value: str, texts: list[str]) -> str | None:
+    """Match a citizenship/work-eligibility intent onto the live dropdown options
+    when the exact phrasing differs. `value` is the mapped intent from
+    map_field_to_profile ('U.S. Citizen', 'Authorized to work', 'Require sponsorship');
+    the real options ('Yes, I am a US citizen', 'Authorized, no sponsorship needed',
+    'Will require sponsorship', ...) are only visible once the box is open."""
+    v = value.lower()
+    # Phrasings that mean the candidate NEEDS sponsorship (the bad option for us).
+    # "no sponsorship" / "without sponsorship" are the GOOD option, so we exclude
+    # only the require-sponsorship wording, not the bare word "sponsor".
+    req_spon = ("require sponsor", "requires sponsor", "will require spon",
+                "need sponsor", "needs sponsor", "require spon")
+
+    def pick(musts, nots=()):
+        for t in texts:
+            tl = t.lower()
+            if all(m in tl for m in musts) and not any(n in tl for n in nots):
+                return t
+        return None
+
+    if "citizen" in v:
+        return (pick(["citizen"], ["not", "non-", "non ", "n't"])
+                or pick(["authorized"], ("not",) + req_spon)
+                or pick(["eligible"], ("not",) + req_spon)
+                or pick(["no sponsor"]) or pick(["without sponsor"]))
+    if "authorized" in v or "eligible" in v:
+        return (pick(["authorized"], ("not",) + req_spon)
+                or pick(["eligible"], ("not",) + req_spon)
+                or pick(["no sponsor"]) or pick(["without sponsor"])
+                or pick(["citizen"], ["not", "non"]))
+    if "sponsor" in v:
+        return pick(["sponsor"], ["no ", "not ", "without", "do not", "don't", "n't"])
     return None
 
 
@@ -1025,6 +1105,8 @@ async def _fill_combobox(page: Page, field: FormField, value: str) -> bool:
         best = _best_option_match(value, texts)
         if not best:
             best = _yesno_option(value, texts)  # map Yes/No onto phrased options
+        if not best:
+            best = _citizenship_option(value, texts)  # citizenship/eligibility phrasings
         if not best:
             print(f"    [fill] no combobox option matched '{value}' in {texts[:8]}")
             return False
@@ -1093,10 +1175,7 @@ async def fill_field(page: Page, field: FormField, value: str):
                     digits_only = "".join(ch for ch in str(value) if ch.isdigit())
                     if digits_only:
                         value = digits_only
-                await el.click()
-                await human_delay(0.2, 0.4)
-                await el.fill("")
-                await el.fill(value)
+                await humanize.type_text(page, el, value)
                 await human_delay(0.3, 0.6)
 
         elif field.field_type == "textarea":
@@ -1108,10 +1187,7 @@ async def fill_field(page: Page, field: FormField, value: str):
                 if field.max_length and len(str(value)) > field.max_length:
                     value = str(value)[:field.max_length].rstrip()
                     print(f"    [fill] truncated textarea to {field.max_length}c limit")
-                await el.click()
-                await human_delay(0.2, 0.4)
-                await el.fill("")
-                await el.fill(value)
+                await humanize.type_text(page, el, value)
                 await human_delay(0.3, 0.6)
 
         elif field.field_type == "select":
@@ -1260,11 +1336,44 @@ async def upload_resume(page: Page, field: FormField, resume_path: str):
         print(f"    [fill] Error uploading resume: {e}")
 
 
+async def _dismiss_error_modal(page: Page) -> bool:
+    """Click 'Try again' on Indeed's transient 'Something went wrong' modal.
+
+    Smartapply throws this during card->preview and preview->submit when a backend
+    call flakes; the error is retryable. Returns True if it clicked Try again.
+    """
+    try:
+        shown = await page.evaluate("""() => {
+            const t = (document.body.innerText || '').toLowerCase();
+            return t.includes('something went wrong') || t.includes('our systems are having');
+        }""")
+        if not shown:
+            return False
+        for btn in await page.query_selector_all('button, [role="button"]'):
+            try:
+                txt = ((await btn.inner_text()) or "").strip().lower()
+            except Exception:
+                continue
+            if txt in ("try again", "retry") and await btn.is_visible() and await btn.is_enabled():
+                try:
+                    await btn.click()
+                except Exception:
+                    await page.evaluate("(e) => e.click()", btn)
+                print("  [form] dismissed 'Something went wrong' -> Try again")
+                await human_delay(2.5, 4.0)
+                return True
+    except Exception:
+        pass
+    return False
+
+
 async def click_continue(page: Page) -> bool:
     """Click the Continue/Next button to advance to the next form step.
 
     Returns True if a continue button was found and clicked.
     """
+    await _dismiss_error_modal(page)
+    await humanize.browse(page)   # mouse/scroll entropy into the token window
     selectors = [
         'button[data-testid="continue-button"]',
         'button[data-testid^="hp-continue-button"]',
@@ -1283,24 +1392,57 @@ async def click_continue(page: Page) -> bool:
         'div[role="button"]:has-text("Continue")',
     ]
 
-    # Indeed often re-renders the Continue button a beat after upload completes.
-    for attempt in range(3):
+    # Indeed often re-renders the Continue button a beat after upload completes,
+    # and renders several "Continue" buttons where only one is visible. Scan ALL
+    # matches per selector and click the first visible+enabled one (query_selector
+    # returns only the first, which can be a hidden duplicate).
+    # ponytail: 6 passes (~15s), scroll-into-view, + a JS text fallback. The
+    # supporting-info ("Qualification check") page mounts an obfuscated-testid
+    # <button>Continue applying</button> a beat late and below the fold, so the
+    # plain visible+enabled scan missed it. JS fallback matches by TEXT (not
+    # testid) and clicks the first laid-out, enabled one.
+    async def _js_click_continue() -> bool:
+        return await page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button, [role="button"]')];
+            const b = btns.find(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                if (!/^(continue applying|save and continue|continue|next)\\b/.test(t)) return false;
+                if (b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+                const r = b.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && b.offsetParent !== null;
+            });
+            if (!b) return false;
+            b.scrollIntoView({block: 'center'});
+            b.click();
+            return true;
+        }""")
+
+    for attempt in range(6):
         for selector in selectors:
             try:
-                btn = await page.query_selector(selector)
-                if btn and await btn.is_visible():
+                for btn in await page.query_selector_all(selector):
                     try:
-                        await btn.click()
+                        await btn.scroll_into_view_if_needed(timeout=1500)
                     except Exception:
-                        await page.evaluate("(e) => e.click()", btn)
-                    await human_delay(1.5, 3.0)
-                    return True
+                        pass
+                    if await btn.is_visible() and await btn.is_enabled():
+                        await humanize.click(page, btn)
+                        await human_delay(1.5, 3.0)
+                        return True
             except Exception:
                 continue
-        if attempt < 2:
+        try:
+            if await _js_click_continue():
+                print("  [form] Continue clicked via JS text fallback")
+                await human_delay(1.5, 3.0)
+                return True
+        except Exception:
+            pass
+        if attempt < 5:
             await human_delay(1.5, 2.5)
 
     print("  [form] No Continue/Next button found")
+    await dump_page(page, "continue-button-missing", force=True)
     return False
 
 
@@ -1336,31 +1478,134 @@ async def click_submit(page: Page) -> bool:
     except Exception:
         pass
     await human_delay(1.5, 2.5)
+    await humanize.browse(page, reads=3)   # read-the-review entropy before Submit
 
     # Retry with progressive backoff. Doubled vs prior version because some
     # employer-customized review pages take 15-20s to mount the Submit button.
-    for attempt in range(8):
+    # Up to ~16 passes (~45s). Indeed keeps Submit disabled while it re-parses a
+    # freshly-uploaded resume server-side, which can take 30s+; a persistent
+    # disable (unmet requirement) still fails within the budget.
+    for attempt in range(16):
+        await _dismiss_error_modal(page)   # retry transient 'Something went wrong'
         for selector in selectors:
             try:
                 btn = await page.query_selector(selector)
                 if btn and await btn.is_visible():
+                    # Never click a disabled button — Playwright's actionability
+                    # wait hangs ~30s on it. Skip and let the backoff loop retry
+                    # so a transient disable (resume parsing) can clear.
+                    if not await btn.is_enabled():
+                        continue
                     if DRY_RUN:
                         print(f"  [form] DRY-RUN: would click Submit ({selector}) — skipping")
                         await dump_page(page, "would-submit", force=True)
                         field_inventory.note(f"would-submit at {page.url}")
                         return True
                     print("  [form] Clicking Submit button...")
-                    await btn.click()
+                    await humanize.click(page, btn)
                     await human_delay(2, 4)
                     return True
             except Exception:
                 continue
-        if attempt < 7:
+        if attempt < 15:
             await human_delay(2, 3)
 
-    print("  [form] No Submit button found")
+    print("  [form] No enabled Submit button found (missing or stayed disabled)")
+    await _probe_submit_disabled(page)
     await dump_page(page, "submit-button-missing", force=True)
     return False
+
+
+async def _probe_submit_disabled(page: Page) -> None:
+    """Dump the React fiber state gating the disabled Submit button.
+
+    Static HTML shows no cause (no errors, no empty required fields), so the
+    disable is post-hydration React state. Walk the fiber tree up from the
+    submit button and print every completion/validity-looking state+prop key.
+    This is the only data that explains why Indeed keeps Submit disabled.
+    """
+    try:
+        info = await page.evaluate(r"""() => {
+            const btn = document.querySelector('[data-testid="submit-application-button"]')
+                     || document.querySelector('button[name="submit-application"]');
+            if (!btn) return {error: 'no submit button in DOM'};
+            const key = Object.keys(btn).find(k => k.startsWith('__reactFiber$'));
+            if (!key) return {error: 'no react fiber on button'};
+            const small = (v) => {
+                const t = typeof v;
+                if (v === null) return 'null';
+                if (t === 'boolean' || t === 'number') return JSON.stringify(v);
+                if (t === 'string') return JSON.stringify(v.slice(0, 60));
+                if (t === 'function') return '<fn>';
+                try { const s = JSON.stringify(v); return s && s.length < 140 ? s : `<${Array.isArray(v)?'arr':'obj'} ${s?s.length:'?'}>`; }
+                catch(e){ return '<unser>'; }
+            };
+            const RE = /(submit|complet|valid|ready|loading|pending|disabl|error|require|missing|resume|pars|dirty|touched|confirm|review|step|can|block|eligib|finish)/i;
+            const path = [], out = [];
+            let fib = btn[key], depth = 0;
+            while (fib && depth < 30) {
+                const name = (fib.type && (fib.type.displayName || fib.type.name || (typeof fib.type==='string'?fib.type:null))) || '?';
+                path.push(`${depth}:${name}`);
+                // named props/state keys matching RE
+                for (const bag of ['memoizedProps', 'memoizedState']) {
+                    const o = fib[bag];
+                    if (o && typeof o === 'object' && !(o.memoizedState !== undefined && o.next !== undefined)) {
+                        for (const k of Object.keys(o)) {
+                            if (RE.test(k)) out.push(`${name}[${depth}].${bag}.${k} = ${small(o[k])}`);
+                        }
+                    }
+                }
+                // function-component hooks linked list -> dump each hook's value
+                if (typeof fib.type === 'function' && fib.memoizedState && fib.memoizedState.next !== undefined) {
+                    let hook = fib.memoizedState, hi = 0;
+                    while (hook && hi < 25) {
+                        const hs = hook.memoizedState;
+                        const t = typeof hs;
+                        if (hs !== null && (t === 'boolean' || t === 'number' || t === 'string')) {
+                            out.push(`${name}[${depth}].hook#${hi} = ${small(hs)}`);
+                        } else if (t === 'object' && hs !== null && depth <= 14) {
+                            // deep-scan the big state object for boolean leaves and
+                            // completion/validity-keyed values (the actual submit gates)
+                            const KRE = /(complet|valid|submit|require|missing|ready|eligib|disabl|error|finish|pending|answer|empt|fill)/i;
+                            const stack = [[hs, `${name}[${depth}].hook#${hi}`, 0]], lim = {n: 0};
+                            const vseen = new Set();
+                            while (stack.length && lim.n < 120) {
+                                const [o, pre, dd] = stack.pop();
+                                if (!o || typeof o !== 'object' || dd > 5 || vseen.has(o)) continue;
+                                vseen.add(o);
+                                for (const k of Object.keys(o)) {
+                                    let v; try { v = o[k]; } catch(e){ continue; }
+                                    const tv = typeof v;
+                                    if (tv === 'boolean' || (KRE.test(k) && (tv==='string'||tv==='number'||v===null))) {
+                                        out.push(`${pre}.${k} = ${small(v)}`); lim.n++;
+                                    } else if (tv === 'object' && v !== null && dd < 5) {
+                                        stack.push([v, `${pre}.${k}`, dd+1]);
+                                    }
+                                    if (lim.n >= 120) break;
+                                }
+                            }
+                        }
+                        hook = hook.next; hi++;
+                    }
+                }
+                fib = fib.return; depth++;
+            }
+            const pk = Object.keys(btn).find(k=>k.startsWith('__reactProps$'));
+            return {props: Object.keys((pk&&btn[pk])||{}), path, fiber: out};
+        }""")
+        import json as _json, time as _time
+        outp = os.path.join("data", "debug", f"{_time.strftime('%Y%m%d-%H%M%S')}-submit-fiber.json")
+        with open(outp, "w", encoding="utf-8") as fh:
+            _json.dump(info, fh, indent=2)
+        print(f"  [probe] submit-disabled fiber state -> {outp}")
+        if info.get("error"):
+            print("    ERROR:", info["error"]); return
+        print("    button props:", info.get("props"))
+        print("    component path:", " > ".join(info.get("path", [])))
+        for line in info.get("fiber", []):
+            print("    *", line)
+    except Exception as e:
+        print("  [probe] fiber read failed:", e)
 
 
 async def _is_resume_source_picker(page: Page) -> bool:
@@ -1446,6 +1691,28 @@ async def _review_includes_resume(page: Page) -> bool:
         return False  # unknown -> treat as no-resume (don't block applying)
 
 
+async def _review_resume_is_ours(page: Page, resume_path: str) -> bool:
+    """True only if EVERY resume filename shown on the review page is our tuned
+    PDF's basename. Indeed's smartapply can keep its stored resume even after our
+    upload "succeeds" (a 'Use a different resume' button opens a native OS dialog
+    Playwright can't fill), so the review would ship the wrong resume. Conservative:
+    any foreign filename, or an unreadable name, returns False -> caller skips.
+    A false skip only costs us an application; a false pass ships the wrong resume."""
+    import os
+    ours = os.path.basename(resume_path).lower()
+    try:
+        names = await page.evaluate(r"""() => {
+            const main = document.querySelector('main,[role=main],#ia-container,.ia-BasePage-content') || document.body;
+            const t = main.innerText || '';
+            return (t.match(/[A-Za-z0-9 _().\-]+\.(pdf|docx?)/ig) || []).map(s => s.trim().toLowerCase());
+        }""")
+    except Exception:
+        return False
+    if not names:
+        return False  # a resume is included but we can't read its name -> don't trust
+    return all(n == ours for n in names)
+
+
 _MODAL_DUMPED = False  # dump the edit-modal DOM only once per process (probe aid)
 
 
@@ -1493,9 +1760,10 @@ async def _fix_resume_review_cards(page: Page, profile: dict) -> bool:
         # obviously-incomplete location (no state, i.e. no comma) or date range (no
         # end, i.e. no "-"/"present"). The error span is the authoritative signal
         # once Continue was attempted; the heuristics catch it beforehand.
-        info = await page.evaluate("""() => {
+        info = await page.evaluate("""(doneIdx) => {
             const cards = [...document.querySelectorAll('[data-testid="workExperience-card"]')];
             for (let i = 0; i < cards.length; i++) {
+                if (doneIdx.includes(i)) continue;   // skip cards we've already edited
                 const c = cards[i];
                 const err = c.querySelector('[data-testid="workExperience-card-validation-error"]');
                 const locEl = c.querySelector('[data-testid="workExperience-card-location"]');
@@ -1510,11 +1778,9 @@ async def _fix_resume_review_cards(page: Page, profile: dict) -> bool:
                 }
             }
             return null;
-        }""")
+        }""", list(done))
         if not info:
             break
-        if info["index"] in done:
-            break  # only remaining flags are cards we already edited (stale error span)
         done.add(info["index"])
         hist = match_hist(info["company"])
         loc = lookup_loc(info["company"], hist)
@@ -1766,6 +2032,17 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                     return "skipped_resume_required", all_answers
                 print("  [resume] No resume in this application (none required) -> ok to submit.")
 
+            # Final resume-integrity gate (independent of the upload step's own
+            # success flag): if the review page shows a resume and it is NOT our
+            # tuned PDF, Indeed kept its stored resume -> never ship the wrong one.
+            if resume_path and await _review_includes_resume(page) \
+                    and not await _review_resume_is_ours(page, resume_path):
+                all_answers["resume_not_used"] = True
+                print(f"  [resume] SKIP: review shows a resume that is NOT our tuned "
+                      f"{os.path.basename(resume_path)} (Indeed kept its stored one). "
+                      "Wrong resume would be sent -> not applying.")
+                return "skipped_resume_required", all_answers
+
             # Pre-submit answer sanity check (deterministic Layer A + one Claude
             # review in Layer B). In DRY_RUN we only print; live, any issue blocks.
             from answer_sanity import sanity_check
@@ -1830,10 +2107,21 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
                         try:
                             loc = page.get_by_role("button", name=name, exact=False).first
                             if await loc.count() and await loc.is_visible():
-                                print(f"  [form] Clicking '{name}' to upload our resume")
+                                print(f"  [form] Clicking '{name}' to open the resume picker")
                                 await loc.click(timeout=3000)
-                                await human_delay(2, 4)  # let file chooser auto-fill + parse
-                                uploaded = True
+                                await human_delay(1.5, 2.5)  # let the dialog mount
+                                # This opens a role=dialog with a HIDDEN <input type=file>
+                                # (no native OS dialog, so the filechooser handler never
+                                # fires). Set our PDF directly on that hidden input —
+                                # set_input_files works on display:none inputs.
+                                fi = (await page.query_selector('div[role="dialog"] input[type="file"]')
+                                      or await page.query_selector('input[type="file"][accept*="pdf" i]')
+                                      or await page.query_selector('input[type="file"]'))
+                                if fi:
+                                    await fi.set_input_files(resume_path)
+                                    await human_delay(3, 5)  # let Indeed parse the upload
+                                    uploaded = True
+                                    print(f"    [fill] Uploaded resume into picker: {resume_path}")
                                 break
                         except Exception:
                             continue

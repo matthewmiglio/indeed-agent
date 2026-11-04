@@ -140,12 +140,41 @@ Provide an appropriate answer for this form field."""
     answer = answer.replace(" — ", ", ").replace("—", ", ")
     answer = answer.replace(" – ", ", ").replace("–", "-").replace(" ,", ",")
 
-    # Hard-respect the char limit, but cut at a sentence boundary so a trimmed
-    # answer still reads cleanly instead of stopping mid-word.
+    # Respect the char limit by ITERATING with the model until the answer fits —
+    # never hard-truncate (a mid-thought cut reads badly in a real application).
+    # The model reliably fits within a couple of retries at a stated limit.
+    def _coerce(a):
+        if isinstance(a, list):
+            a = ", ".join(str(x) for x in a) if a else ""
+        elif isinstance(a, dict):
+            a = ", ".join(f"{k}: {v}" for k, v in a.items())
+        a = str(a or "").strip()
+        return (a.replace(" — ", ", ").replace("—", ", ")
+                 .replace(" – ", ", ").replace("–", "-").replace(" ,", ","))
+
+    shrink = 0
+    while max_length and len(answer) > max_length and shrink < 4:
+        shrink += 1
+        over = len(answer) - max_length
+        shrink_prompt = (
+            prompt
+            + f"\n\nYour previous answer was {len(answer)} characters — {over} OVER "
+              f"the {max_length}-character limit. Rewrite it to fit within "
+              f"{int(max_length * 0.9)} characters. Keep complete sentences and the "
+              f"most relevant points; do NOT cut off mid-thought."
+        )
+        raw, tokens = chat_json(SYSTEM_PROMPT, shrink_prompt, model=model)
+        print(f"  [llm] over limit ({len(answer)}>{max_length}); shrink try "
+              f"{shrink}/4 ({tokens} tokens)")
+        try:
+            a2 = _coerce(json.loads(raw).get("answer", ""))
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        if a2:
+            answer = a2
     if max_length and len(answer) > max_length:
-        cut = answer[:max_length]
-        end = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("! "), cut.rfind("? "))
-        answer = cut[:end + 1] if end > max_length * 0.5 else cut.rstrip()
+        print(f"  [llm] WARNING: still {len(answer)}>{max_length} after {shrink} "
+              f"shrink tries — leaving as-is (field may block the form)")
 
     confidence = result.get("confidence", "low")
     reasoning = result.get("reasoning", "")

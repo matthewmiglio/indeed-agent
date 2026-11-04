@@ -21,7 +21,7 @@ form_filler.DRY_RUN = True    # walk the flow, NEVER click Submit
 from browser import launch_browser, check_login_status, human_delay
 from job_searcher import navigate_to_job, extract_job_details
 from form_filler import fill_and_submit_application
-from profile_manager import load_profile
+from search_profiles import effective_profile
 from resume_tuner import build_tuned_resume
 import field_inventory
 from field_inventory import UNHANDLED_REQUIRED_PATH
@@ -31,8 +31,68 @@ async def main(job_url, resume_pdf=None):
     if os.path.exists(UNHANDLED_REQUIRED_PATH):
         os.remove(UNHANDLED_REQUIRED_PATH)   # isolate this attempt
     field_inventory.init_run(mode="dry-run")
-    profile = load_profile()
+    profile = effective_profile()   # user profile + active search overrides (salary, etc.)
     pw, ctx, page = await launch_browser()
+
+    # --- probe: log backend calls that carry the finish/submit application state ---
+    KW = ("finishApplicationUrl", "finishApplication", "readyToSubmit",
+          "submitApplication", "isITVCheckSuccessful", "FinishApply")
+    netlog = os.path.join("data", "debug", "net-finish.log")
+    gqldir = os.path.join("data", "debug", "gql")
+    os.makedirs(gqldir, exist_ok=True)
+    gqln = {"i": 0}
+    async def _on_response(resp):
+        try:
+            u = resp.url
+            if not any(s in u for s in ("graphql", "smartapply", "indeedapply", "apply")):
+                return
+            body = await resp.text()
+            # dump every graphql request+response this run for offline analysis
+            if "apis.indeed.com/graphql" in u:
+                import json as _j
+                try: post = resp.request.post_data or ""
+                except Exception: post = ""
+                opname = ""
+                try: opname = _j.loads(post).get("operationName", "") or ""
+                except Exception: pass
+                gqln["i"] += 1
+                fn = os.path.join(gqldir, f"{gqln['i']:03d}-{opname[:40] or 'op'}.json")
+                try: req_obj = _j.loads(post)
+                except Exception: req_obj = post
+                try: resp_obj = _j.loads(body)
+                except Exception: resp_obj = body
+                with open(fn, "w", encoding="utf-8") as fh:
+                    _j.dump({"url": u, "status": resp.status, "request": req_obj, "response": resp_obj}, fh, indent=2, default=str)
+            if not any(k in body for k in KW):
+                return
+            # Full request+response for the submitApplication mutation (unique field
+            # saveFileSuccess) — the request variables show whether the client asked
+            # to preview vs finalize, and the response is the server's readiness view.
+            if "apis.indeed.com/graphql" in u and "saveFileSuccess" in body:
+                fullp = os.path.join("data", "debug", "net-submit-full.json")
+                if not os.path.exists(fullp):
+                    try:
+                        req = resp.request
+                        post = req.post_data or ""
+                    except Exception:
+                        post = ""
+                    import json as _j
+                    try: resp_obj = _j.loads(body)
+                    except Exception: resp_obj = body
+                    try: req_obj = _j.loads(post)
+                    except Exception: req_obj = post
+                    with open(fullp, "w", encoding="utf-8") as fh:
+                        _j.dump({"request": req_obj, "response": resp_obj}, fh, indent=2, default=str)
+            with open(netlog, "a", encoding="utf-8") as fh:
+                fh.write(f"\n==== {resp.status} {u}\n")
+                for k in KW:
+                    i = body.find(k)
+                    if i >= 0:
+                        fh.write(f"  ...{body[max(0,i-80):i+200]}...\n")
+        except Exception:
+            pass
+    page.on("response", lambda r: asyncio.ensure_future(_on_response(r)))
+
     try:
         await page.goto("https://www.indeed.com", wait_until="domcontentloaded")
         await human_delay(1, 2)
