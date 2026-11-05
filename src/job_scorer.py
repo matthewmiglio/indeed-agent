@@ -20,7 +20,7 @@ Return ONLY valid JSON:
 Step 1 — hard rules. If ANY of these fire, set pass=false regardless of score:
 - The job requires core skills the candidate clearly lacks and could not learn quickly.
 - The job is in a different field from the candidate's experience.
-- A salary is listed and is meaningfully below the candidate's stated minimum.
+- A salary is listed and is below the candidate's stated minimum. For a listed RANGE, use the TOP of the range: the job clears the floor if its ceiling reaches the minimum (e.g. "$150k-$206k" clears a $200k minimum because the top, $206k, is at or above it). Only fail when even the top of the range is below the minimum.
 - The job matches one of the candidate's exclusions.
 - The job requires a license/certification the candidate does not hold.
 

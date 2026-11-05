@@ -730,6 +730,17 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
         exp = _experience_with_answer(label, profile)
         if exp is not None:
             return exp
+    # Vendor-relationship screeners: "Is your current employer a customer of X?",
+    # "Is your company a partner/reseller of X?", "Does your employer use <product>?".
+    # The profile has no grounded evidence of any such relationship, so the truthful
+    # default is No. Deterministic so the model can't answer Yes (it did on one run,
+    # and the sanity gate happened to pass it that time).
+    if field.field_type in ("radio", "checkbox", "select"):
+        if (any(r in label for r in ("customer of", "client of", "partner of",
+                                     "reseller of"))
+                or any(f"does your {a} use" in label
+                       for a in ("employer", "company", "organization", "organisation"))):
+            return "No"
     if field.field_type in ("checkbox", "radio") and any(
         k in label for k in (
             "shift", "mornings", "evenings", "nights", "overnight",
@@ -844,6 +855,15 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
                     return "No"
                 return "Yes" if profile.get("willing_to_relocate") else "No"
             if profile_key == "_us":
+                # "country" also appears in Yes/No legal questions ("...an entity
+                # in another country"). Only answer "United States" where it fits:
+                # a free-text field, or a choice field that actually lists a
+                # country. A Yes/No radio/checkbox must fall through to the yes/no
+                # handler instead of getting the nonsense value "United States".
+                if field.field_type in ("radio", "checkbox", "select", "combobox"):
+                    opts_blob = " | ".join(field.options or []).lower()
+                    if not any(s in opts_blob for s in ("united states", "usa", "u.s.")):
+                        return None
                 return "United States"
             if profile_key == "_resume_pdf":
                 return "resume.pdf"
@@ -910,6 +930,19 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
             value = profile.get(profile_key)
             if value is None:
                 return None
+
+            # Guard: a free-text profile value (employer, city, name...) must not be
+            # jammed into a Yes/No choice field. Labels like "Is your current employer
+            # a customer of X?" contain "current employer" but are radios. If this is a
+            # choice field whose options the value matches none of, fall through to the
+            # LLM. Booleans are exempt — they convert to a legit Yes/No below.
+            if (not isinstance(value, bool)
+                    and field.field_type in ("radio", "checkbox", "select", "combobox")
+                    and field.options):
+                sval = str(value).strip().lower()
+                if sval and not any(sval in o.strip().lower() or o.strip().lower() in sval
+                                    for o in field.options):
+                    return None
 
             # Convert booleans to Yes/No for form fields
             if isinstance(value, bool):

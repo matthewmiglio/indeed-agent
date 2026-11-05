@@ -169,10 +169,13 @@ async def screenshot(page: Page, label: str = "snapshot", full_page: bool = True
 # Signed-in only: the account menu in the global nav. Present on every logged-in
 # Indeed page (home, search, job detail); absent when signed out.
 _LOGGED_IN_SEL = '[data-gnav-element-name="AccountMenu"]'
-# Signed-out only: the Google One-Tap sign-in widget + a login link. Rendered only
-# when NOT authenticated, so their presence (with no account menu) means deauthed.
-_SIGNED_OUT_SEL = ('[data-testid="google-sdk-button-container"], '
-                   '[data-gnav-element-name="SignIn"], a[href*="account/login"]')
+# Signed-out signal: the global-nav "Sign in" affordance. This is mutually
+# exclusive with the account menu (logged in -> AccountMenu; logged out -> SignIn),
+# so it's the one reliable tell. We deliberately do NOT key on the Google One-Tap
+# widget or a bare a[href*="account/login"]: both can render on a logged-in home
+# (one-tap re-prompts, footer/legal login links persist), which caused recurring
+# false "logged out" stops while the session was actually valid.
+_SIGNED_OUT_SEL = '[data-gnav-element-name="SignIn"]'
 
 
 async def _probe_login(page: Page) -> str:
