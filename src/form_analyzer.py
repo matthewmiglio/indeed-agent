@@ -141,7 +141,13 @@ async def analyze_form_page(page: Page) -> list[FormField]:
                 type: type,
                 label: getLabel(el),
                 required: el.required || el.getAttribute('aria-required') === 'true',
-                value: el.value || '',
+                // For a checkbox/radio, el.value is the static VALUE attribute
+                // ("on"/"1"), not whether it's ticked. Report the CHECKED state so
+                // an unchecked-but-required consent box ("Agree", value="1") isn't
+                // mistaken for already-satisfied and skipped.
+                value: (el.type === 'checkbox' || el.type === 'radio')
+                    ? (el.checked ? (el.value || 'on') : '')
+                    : (el.value || ''),
                 options: options,
                 placeholder: el.placeholder || '',
                 selector: selector,

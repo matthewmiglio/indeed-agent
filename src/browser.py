@@ -166,9 +166,64 @@ async def screenshot(page: Page, label: str = "snapshot", full_page: bool = True
     return path
 
 
-async def check_login_status(page: Page) -> bool:
-    """Check if we're still logged into Indeed (not redirected to login page)."""
+# Signed-in only: the account menu in the global nav. Present on every logged-in
+# Indeed page (home, search, job detail); absent when signed out.
+_LOGGED_IN_SEL = '[data-gnav-element-name="AccountMenu"]'
+# Signed-out only: the Google One-Tap sign-in widget + a login link. Rendered only
+# when NOT authenticated, so their presence (with no account menu) means deauthed.
+_SIGNED_OUT_SEL = ('[data-testid="google-sdk-button-container"], '
+                   '[data-gnav-element-name="SignIn"], a[href*="account/login"]')
+
+
+async def _probe_login(page: Page) -> str:
+    """One login read of the CURRENT page: 'in' | 'out' | 'unknown' (no reload)."""
     url = page.url.lower()
     if "secure.indeed.com/auth" in url or "/login" in url:
-        return False
-    return True
+        return "out"
+    try:
+        # let the global nav settle; absent is only meaningful once the page is up
+        try:
+            await page.wait_for_selector(
+                f'{_LOGGED_IN_SEL}, {_SIGNED_OUT_SEL}', timeout=8000)
+        except Exception:
+            pass  # neither showed; fall through to the counts
+        if await page.locator(_LOGGED_IN_SEL).count() > 0:
+            return "in"
+        if await page.locator(_SIGNED_OUT_SEL).count() > 0:
+            return "out"
+    except Exception:
+        return "unknown"  # DOM probe failed; don't read into it
+    return "unknown"
+
+
+async def check_login_status(page: Page) -> bool:
+    """Are we still logged into Indeed? Content-based, with backoff recheck.
+
+    A deauthed session still serves indeed.com URLs (the job page even keeps its
+    path), so a URL-only check is useless -- we read the DOM: logged in iff the
+    global-nav account menu is present; deauthed if it's absent and a sign-in
+    affordance is showing; unknown (neither) -> assume OK so a transient/slow nav
+    doesn't false-stop a healthy run.
+
+    A single 'out' read is NOT trusted: a slow load or Cloudflare bounce can land
+    on a /login redirect or a half-rendered shell for a moment while the session is
+    still valid. So on 'out' we reload the Indeed home with a short backoff and
+    reprobe; only a persistent 'out' across all attempts returns False. A real
+    deauth stays out across reloads; a transient one clears.
+    """
+    state = await _probe_login(page)
+    if state == "in":
+        return True
+    if state == "unknown":
+        return True
+    # state == "out": re-verify against a fresh home load before believing it.
+    for backoff in (2, 4):
+        await asyncio.sleep(backoff)
+        try:
+            await page.goto("https://www.indeed.com", wait_until="domcontentloaded")
+        except Exception:
+            continue  # nav failed (slow/throttle) -> try again, don't conclude 'out'
+        state = await _probe_login(page)
+        if state == "in" or state == "unknown":
+            return True
+    return False  # out on the initial read AND both home rechecks

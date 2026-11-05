@@ -550,6 +550,33 @@ def map_field_to_profile(field: FormField, profile: dict, job_data: dict | None 
             except ValueError:
                 pass
 
+    # Mandatory consent/agreement checkbox — e.g. a SmartRecruiters "Agree" to the
+    # recruiting company's data-processing notice, shown as a single required
+    # checkbox whose visible label is just "Agree" (the consent paragraph sits
+    # above it, so FIELD_MAP's "i have read and agree"/"privacy policy" patterns
+    # miss). Unchecked, it shows "Choose an option to continue" and the Review/
+    # Submit button stays inert. These are required to submit ANY application, so
+    # tick them. Gate on field.required so the OPTIONAL Indeed opt-ins ("Save my
+    # answers", "Share these answers") stay off, and exclude marketing/SMS opt-ins
+    # that merely contain the word "consent".
+    # NOTE: don't gate on field.required — the asterisk often sits on the consent
+    # paragraph, not the <input>, so the analyzer reports required=False. The
+    # opt-in exclusion + "no options" (a lone checkbox, not a multi-select) keep
+    # this from catching anything but a genuine consent gate.
+    if field.field_type == "checkbox" and not field.options:
+        _consent = ("agree", "consent", "acknowledge", "i certify", "i confirm",
+                    "read and", "terms", "privacy")
+        _optin = ("text message", "sms", "marketing", "promotional",
+                  "save my answers", "share these answers", "call me",
+                  "receive text", "phone")
+        if any(k in label for k in _consent) and not any(k in label for k in _optin):
+            return "Yes"
+        # Bare required checkbox with an empty label — a lone consent gate you
+        # must tick to proceed (keep the required gate here; an empty label is too
+        # weak a signal on its own).
+        if field.required and label.strip() == "":
+            return "Yes"
+
     # Start-date fields that require a real MM/DD/YYYY value. The profile's
     # ``start_date`` is often "Immediately" / "ASAP" which fails Indeed's date
     # validator. If the field is recognizable as a date input (label contains
@@ -1996,6 +2023,8 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
     resume_done = False  # upload our tuned PDF exactly once
     stuck_url = None
     stuck_n = 0
+    prev_sig = None   # page signature (url + field labels) to catch a non-advancing
+    sig_repeat = 0    # fields-found page that keeps re-rendering after Continue
     total_fields_seen = 0  # giant-ATS-form detector (see below)
     for step in range(max_steps):
         print(f"\n  [form] === Step {step + 1}/{max_steps} ===")
@@ -2135,6 +2164,22 @@ async def fill_and_submit_application(page: Page, user_profile: dict,
         # Analyze the current form page
         fields = await analyze_form_page(page)
         field_inventory.record_page(fields, job_url=page.url, step=step + 1)
+
+        # Stuck-page guard for the fields-FOUND path: click_continue returns True
+        # on a successful click even when the SPA doesn't move (e.g. a consent page
+        # whose Continue stays inert because a required checkbox we treated as
+        # pre-filled is actually unchecked). The no-fields branch has its own guard;
+        # this catches a page that re-renders the same fields every step. Dump it
+        # once for diagnosis, then fail instead of grinding to the step cap.
+        if fields:
+            sig = (page.url.lower(), tuple(sorted((f.label_text or "") for f in fields)))
+            sig_repeat = sig_repeat + 1 if sig == prev_sig else 0
+            prev_sig = sig
+            if sig_repeat >= 2:
+                print(f"  [form] Same page re-rendered {sig_repeat + 1}x without "
+                      f"advancing — giving up")
+                await dump_page(page, f"form-stuck-step-{step + 1}", force=True)
+                return "failed", all_answers
 
         # Giant ATS-form detect-and-skip. Some employers embed a full multi-page
         # applicant-tracking form (dozens of checkboxes, EEO matrices, several

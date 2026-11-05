@@ -202,7 +202,11 @@ async def collect_job_listings(page: Page, target_count: int = 10,
                     // Require state-level match instead (e.g. ", MI") so we still
                     // exclude sponsored cross-region bleed (e.g. searching MI but
                     // showing TX jobs) without rejecting in-metro listings.
-                    if (cityFilter && location) {
+                    // Remote jobs qualify from anywhere in the US — never
+                    // region-filter them. Only hybrid/onsite cards must match
+                    // the searched state.
+                    const isRemote = /remote|work from home|anywhere/i.test(location);
+                    if (cityFilter && location && !isRemote) {
                         // Pull a 2-letter state code out of the searched location
                         // (passed in as "ann arbor, mi" lowercased).
                         const stateMatch = (cityFilter || '').match(/,\s*([a-z]{2})\b/);
