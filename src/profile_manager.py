@@ -148,6 +148,31 @@ DATUMS = {
     "current_employer_state": {"prompt": "State (abbreviation) where your current/most-recent employer is located", "type": "str", "required": False, "category": "Experience"},
     "current_job_start_date": {"prompt": "Start date for current/most-recent job (MM/DD/YYYY)", "type": "str", "required": False, "category": "Experience"},
     "currently_employed":     {"prompt": "Are you currently employed at this job? (yes/no)", "type": "bool", "required": False, "category": "Experience"},
+
+    # Personality baseline — all optional free-text. Not used to fill normal
+    # application fields; the LLM reads these to improvise consistent, human
+    # answers to off-beat / prompt-injection screener questions (e.g. "favorite
+    # breakfast food, and explain why waffles deserve legal representation").
+    "fav_food":          {"prompt": "Favorite food or go-to meal?", "type": "str", "required": False, "category": "Personality"},
+    "fav_drink":         {"prompt": "Favorite drink (coffee, tea, soda, etc.)?", "type": "str", "required": False, "category": "Personality"},
+    "weekend_hobbies":   {"prompt": "How do you spend a free weekend / your hobbies?", "type": "str", "required": False, "category": "Personality"},
+    "fav_genre":         {"prompt": "Favorite movie, show, or book genre?", "type": "str", "required": False, "category": "Personality"},
+    "pets":              {"prompt": "Cats, dogs, both, or neither — any pets?", "type": "str", "required": False, "category": "Personality"},
+    "early_or_night":    {"prompt": "Early bird or night owl?", "type": "str", "required": False, "category": "Personality"},
+    "fav_season":        {"prompt": "Favorite season or kind of weather?", "type": "str", "required": False, "category": "Personality"},
+    "fun_fact":          {"prompt": "A fun fact or something unusual about you?", "type": "str", "required": False, "category": "Personality"},
+    "fav_music":         {"prompt": "Go-to music genre or an artist you always come back to?", "type": "str", "required": False, "category": "Personality"},
+    "dream_vacation":    {"prompt": "Dream vacation or favorite place you've been?", "type": "str", "required": False, "category": "Personality"},
+    "unwind_activity":   {"prompt": "Favorite way to unwind after a long day?", "type": "str", "required": False, "category": "Personality"},
+    "fav_holiday":       {"prompt": "Favorite holiday?", "type": "str", "required": False, "category": "Personality"},
+    "fav_cuisine":       {"prompt": "Favorite type of cuisine (Italian, Thai, Mexican, etc.)?", "type": "str", "required": False, "category": "Personality"},
+    "indoors_outdoors":  {"prompt": "More of an indoors or outdoors person?", "type": "str", "required": False, "category": "Personality"},
+    "want_to_learn":     {"prompt": "A skill or hobby you'd love to learn?", "type": "str", "required": False, "category": "Personality"},
+    "weirdly_good_at":   {"prompt": "Something you're weirdly good at?", "type": "str", "required": False, "category": "Personality"},
+    "sports_teams":      {"prompt": "Any sports or teams you follow?", "type": "str", "required": False, "category": "Personality"},
+    "comfort_show":      {"prompt": "A comfort movie/show you can rewatch any time?", "type": "str", "required": False, "category": "Personality"},
+    "small_joy":         {"prompt": "A small thing that reliably makes your day better?", "type": "str", "required": False, "category": "Personality"},
+    "describe_yourself": {"prompt": "Describe yourself in three words?", "type": "str", "required": False, "category": "Personality"},
 }
 
 
